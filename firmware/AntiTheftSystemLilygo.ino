@@ -273,7 +273,8 @@ bool sendWithImage(String reason) {
   sendATWait("AT+CIPCLOSE=0", 5000);
   delay(500);
   while (SerialAT.available()) SerialAT.read();  // Drain remaining AT responses
-  delay(1500);  // Wait before second connection
+  SerialMon.println("  Waiting for battery recovery...");
+  delay(5000);  // Wait for 18650 battery voltage recovery before image upload
 
   // === NOTIFICATION 2: Image-only with minimal headers ===
   SerialMon.println("  [2/2] Sending photo...");
