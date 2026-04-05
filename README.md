@@ -227,7 +227,7 @@ AI-Anti-Theft-System-CAV/
 Wayne State University — HP0787
 Undergraduate Research Opportunity Program (UROP), Winter 2026
 
-**Faculty Advisor:** Dr. Lubna Alazzawi — Wayne State University, Department of Computer Science
+**Faculty Advisor:** Dr. Lubna Alazzawi — Wayne State University, Department of Electrical and Computer Engineering
 
 ## License
 
