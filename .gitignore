@@ -1,0 +1,34 @@
+# Arduino / ESP32 build artifacts
+build/
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.d
+
+# Arduino IDE
+*.ino.eep
+*.ino.hex
+*.ino.with_bootloader.bin
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# IDE files
+.vscode/
+*.code-workspace
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Claude Code
+.claude/
+
+# Original .txt source files (kept as .ino in firmware/)
+*.txt
