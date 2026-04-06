@@ -29,6 +29,10 @@ const char APN[]        = "hologram";
 const char NTFY_TOPIC[] = "antitheft-gonnie-2219";
 const char NTFY_IP[]    = "159.203.148.75";
 
+#define OWNER_PHONE "+16093589220"
+#define HOLOGRAM_DEVICE_ID 43055
+#define HOLOGRAM_API_KEY "6V6MpR4FbilZ4RyAiX3an6sLqXcPoV"
+
 #define IMG_BUF_SIZE 51200
 uint8_t* imgBuffer = NULL;
 size_t imgSize = 0;
@@ -90,6 +94,205 @@ String getModemTime() {
     if (j > i) return r.substring(i + 8, j);
   }
   return "";
+}
+
+// ── SMS Body Builders ───────────────────────────────────────
+String buildSMSAlert(String reason) {
+  if (reason.length() > 60) reason = reason.substring(0, 60);
+  String msg = "ALERT: " + reason;
+  if (gpsLat.length() > 0) {
+    msg += "\nLoc: " + gpsLat + "," + gpsLon;
+    msg += "\n" + gpsMapsLink;
+  }
+  if (msg.length() > 160) msg = msg.substring(0, 160);
+  return msg;
+}
+
+String buildSMSStatus(String status) {
+  String msg = "System " + status;
+  if (gpsLat.length() > 0) {
+    msg += "\nLoc: " + gpsLat + "," + gpsLon;
+    msg += "\n" + gpsMapsLink;
+  }
+  if (msg.length() > 160) msg = msg.substring(0, 160);
+  return msg;
+}
+
+// ── SMS via AT+CMGS (DISABLED) ──────────────────────────────
+// NOTE: CMGS is disabled because Hologram reports false success:
+// the modem returns "+CMGS: <ref>" / OK but no SMS is actually
+// delivered. Kept here verbatim for reference in case carrier
+// behavior changes — re-enable by removing the /* and */ wrappers.
+/*
+bool sendSMSviaCMGS(String message) {
+  SerialMon.println("[SMS-CMGS] Trying text-mode SMS...");
+  ensureNetwork();
+  if (!networkReady) {
+    SerialMon.println("[SMS-CMGS] No network");
+    return false;
+  }
+
+  while (SerialAT.available()) SerialAT.read();  // drain buffer
+
+  sendATWait("AT+CMGF=1", 2000);         // text mode
+  sendATWait("AT+CSCS=\"GSM\"", 2000);   // best-effort 7-bit
+
+  while (SerialAT.available()) SerialAT.read();  // drain again
+
+  SerialAT.print("AT+CMGS=\"");
+  SerialAT.print(OWNER_PHONE);
+  SerialAT.print("\"\r\n");
+
+  // Wait for '>' prompt (up to 5s)
+  unsigned long s = millis(); String r = "";
+  bool gotPrompt = false;
+  while (millis() - s < 5000) {
+    while (SerialAT.available()) r += (char)SerialAT.read();
+    if (r.indexOf(">") >= 0) { gotPrompt = true; break; }
+    if (r.indexOf("ERROR") >= 0) break;
+    delay(10);
+  }
+  if (!gotPrompt) {
+    SerialMon.println("[SMS-CMGS] No prompt, aborting. Buf: " + r);
+    SerialAT.write((uint8_t)0x1B);  // ESC abort
+    delay(500);
+    while (SerialAT.available()) SerialAT.read();
+    return false;
+  }
+
+  // Send body + Ctrl+Z
+  SerialAT.print(message);
+  SerialAT.write((uint8_t)0x1A);
+
+  // Wait up to 30s for +CMGS: or ERROR
+  s = millis(); r = "";
+  bool ok = false;
+  while (millis() - s < 30000) {
+    while (SerialAT.available()) r += (char)SerialAT.read();
+    if (r.indexOf("+CMGS:") >= 0) { ok = true; break; }
+    if (r.indexOf("ERROR") >= 0) break;
+    delay(50);
+  }
+
+  SerialMon.println("[SMS-CMGS] Response: " + r.substring(0, min((int)r.length(), 400)));
+  SerialMon.println(ok ? "[SMS-CMGS] SUCCESS" : "[SMS-CMGS] FAILED");
+  return ok;
+}
+*/
+
+// ── SMS via Hologram HTTP API (uses native HTTPS stack) ──────
+bool sendSMSviaHologramAPI(String message) {
+  SerialMon.println("[SMS-API] Trying Hologram HTTP API...");
+  ensureNetwork();
+  if (!networkReady) {
+    SerialMon.println("[SMS-API] No network");
+    return false;
+  }
+
+  // Escape JSON special chars: \, ", \n
+  String esc = "";
+  for (size_t i = 0; i < message.length(); i++) {
+    char c = message.charAt(i);
+    if (c == '\\') esc += "\\\\";
+    else if (c == '"') esc += "\\\"";
+    else if (c == '\n') esc += "\\n";
+    else if (c == '\r') esc += "\\r";
+    else esc += c;
+  }
+
+  String json = "{\"deviceid\":" + String(HOLOGRAM_DEVICE_ID) +
+                ",\"body\":\"" + esc +
+                "\",\"tonum\":\"" + String(OWNER_PHONE) + "\"}";
+
+  String url = "https://dashboard.hologram.io/api/1/sms/incoming?apikey=" +
+               String(HOLOGRAM_API_KEY);
+
+  sendATWait("AT+HTTPTERM", 2000);  // best-effort clear
+
+  String r = sendATWait("AT+HTTPINIT", 5000);
+  if (r.indexOf("OK") < 0) {
+    SerialMon.println("[SMS-API] HTTPINIT failed: " + r);
+    return false;
+  }
+
+  sendATWait("AT+HTTPPARA=\"CID\",1", 2000);
+  sendATWait("AT+HTTPPARA=\"URL\",\"" + url + "\"", 2000);
+  sendATWait("AT+HTTPPARA=\"CONTENT\",\"application/json\"", 2000);
+
+  // HTTPDATA: wait for DOWNLOAD prompt
+  SerialAT.println("AT+HTTPDATA=" + String(json.length()) + ",10000");
+  unsigned long s = millis(); String dr = "";
+  bool gotDownload = false;
+  while (millis() - s < 5000) {
+    while (SerialAT.available()) dr += (char)SerialAT.read();
+    if (dr.indexOf("DOWNLOAD") >= 0) { gotDownload = true; break; }
+    if (dr.indexOf("ERROR") >= 0) break;
+    delay(10);
+  }
+  if (!gotDownload) {
+    SerialMon.println("[SMS-API] No DOWNLOAD prompt: " + dr);
+    sendATWait("AT+HTTPTERM", 2000);
+    return false;
+  }
+
+  SerialAT.print(json);
+  // Wait for OK after body
+  s = millis(); dr = "";
+  while (millis() - s < 10000) {
+    while (SerialAT.available()) dr += (char)SerialAT.read();
+    if (dr.indexOf("OK") >= 0 || dr.indexOf("ERROR") >= 0) break;
+    delay(10);
+  }
+
+  // POST
+  SerialAT.println("AT+HTTPACTION=1");
+  s = millis(); String ar = "";
+  int statusCode = -1;
+  int respLen = 0;
+  while (millis() - s < 30000) {
+    while (SerialAT.available()) ar += (char)SerialAT.read();
+    int p = ar.indexOf("+HTTPACTION:");
+    if (p >= 0) {
+      int c1 = ar.indexOf(',', p);
+      int c2 = ar.indexOf(',', c1 + 1);
+      int eol = ar.indexOf('\n', c2 + 1);
+      if (c1 > 0 && c2 > c1 && eol > c2) {
+        statusCode = ar.substring(c1 + 1, c2).toInt();
+        respLen = ar.substring(c2 + 1, eol).toInt();
+        break;
+      }
+    }
+    delay(50);
+  }
+  // Log full HTTPACTION line for debugging
+  SerialMon.println("[SMS-API] HTTPACTION raw: " + ar);
+  SerialMon.println("[SMS-API] HTTPACTION status=" + String(statusCode) + " len=" + String(respLen));
+
+  // Read full body if present, for debug
+  if (respLen > 0) {
+    SerialAT.println("AT+HTTPREAD=0," + String(respLen));
+    unsigned long rs = millis(); String body = "";
+    while (millis() - rs < 5000) {
+      while (SerialAT.available()) body += (char)SerialAT.read();
+      if (body.indexOf("OK") >= 0) break;
+      delay(10);
+    }
+    SerialMon.println("[SMS-API] Body: " + body);
+  }
+
+  sendATWait("AT+HTTPTERM", 2000);
+
+  bool ok = (statusCode == 200 || statusCode == 201);
+  SerialMon.println(ok ? "[SMS-API] SUCCESS" : "[SMS-API] FAILED");
+  return ok;
+}
+
+// ── SMS Dispatcher ──────────────────────────────────────────
+bool sendSMS(String message) {
+  SerialMon.println("[SMS] Sending: " + message.substring(0, min((int)message.length(), 80)));
+  if (sendSMSviaHologramAPI(message)) return true;
+  SerialMon.println("[SMS] Hologram API failed");
+  return false;
 }
 
 // ── Setup ────────────────────────────────────────────────────
@@ -243,6 +446,11 @@ bool receiveImage() {
 
 // ── Send with Image (two notifications) ─────────────────────
 bool sendWithImage(String reason) {
+  // === SMS PRIMARY (best-effort, non-gating) ===
+  if (gpsLat.length() == 0) updateGPS();
+  sendSMS(buildSMSAlert(reason));
+
+  // === NTFY FALLBACK / IMAGE DELIVERY (existing behavior) ===
   // === NOTIFICATION 1: Text alert with clickable Maps link ===
   SerialMon.println("  [1/2] Sending text alert...");
   
@@ -400,6 +608,10 @@ bool cipSend(String data) {
 
 // ── Text-Only Notification (fallback) ────────────────────────
 bool sendTextOnly(String reason) {
+  // SMS primary path (best-effort)
+  if (gpsLat.length() == 0) updateGPS();
+  sendSMS(buildSMSAlert(reason));
+
   String timestamp = getModemTime();
   String body = "**ALERT:** " + reason;
   if (timestamp.length() > 0) body += "\nTime: " + timestamp;
@@ -422,6 +634,11 @@ bool sendTextOnly(String reason) {
 // ── Status Notification ─────────────────────────────────────
 bool sendStatusNotification(String status) {
   updateGPS();
+
+  // === SMS PRIMARY ===
+  bool smsOk = sendSMS(buildSMSStatus(status));
+
+  // === NTFY FALLBACK (still runs, lightweight) ===
   String body = "System " + status;
   if (gpsLat.length() > 0) body += "\nLocation: " + gpsLat + "," + gpsLon;
 
@@ -433,12 +650,14 @@ bool sendStatusNotification(String status) {
   req += "Content-Length: " + String(body.length()) + "\r\n";
   req += "Connection: close\r\n\r\n" + body;
 
-  if (!tcpConnect()) return false;
-  if (!cipSend(req)) { sendATWait("AT+CIPCLOSE=0",5000); return false; }
-  bool ok = waitForResponse();
-  delay(500);
-  sendATWait("AT+CIPCLOSE=0", 5000);
-  return ok;
+  bool ntfyOk = false;
+  if (tcpConnect()) {
+    if (cipSend(req)) ntfyOk = waitForResponse();
+    delay(500);
+    sendATWait("AT+CIPCLOSE=0", 5000);
+  }
+
+  return smsOk || ntfyOk;
 }
 
 // ── Heartbeat ───────────────────────────────────────────────
