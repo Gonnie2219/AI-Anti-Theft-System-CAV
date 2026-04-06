@@ -1,15 +1,15 @@
 /*
- * ANTI-THEFT SYSTEM — Phase 4b (Image Transfer)
- * LILYGO T-SIM7600G-H: Receives alert + photo, uploads to ntfy.sh
+ * ANTI-THEFT SYSTEM — LILYGO T-SIM7600G-H
+ * Cellular gateway: receives alert + photo from Main ESP32, uploads to ntfy.sh.
  * Board: ESP32 Dev Module
- * 
+ *
  * Serial  (UART0) = USB debug
  * Serial1 (UART1) = SIM7600 modem (GPIO26 RX / GPIO27 TX)
- * Serial2 (UART2) = Main ESP32 (GPIO21 RX / GPIO19 TX)
- * 
- * Wiring: Main GPIO27 TX → LILYGO GPIO21 RX
- *         Main GPIO26 RX ← LILYGO GPIO19 TX
- *         GND ↔ GND
+ * Serial2 (UART2) = Main ESP32    (GPIO21 RX / GPIO19 TX)
+ *
+ * Wiring: Main GPIO27 TX -> LILYGO GPIO21 RX
+ *         Main GPIO26 RX <- LILYGO GPIO19 TX
+ *         GND <-> GND
  */
 
 #define MODEM_TX        27
@@ -28,10 +28,6 @@
 const char APN[]        = "hologram";
 const char NTFY_TOPIC[] = "antitheft-gonnie-2219";
 const char NTFY_IP[]    = "159.203.148.75";
-
-#define OWNER_PHONE "+16093589220"
-#define HOLOGRAM_DEVICE_ID 43055
-#define HOLOGRAM_API_KEY "6V6MpR4FbilZ4RyAiX3an6sLqXcPoV"
 
 #define IMG_BUF_SIZE 51200
 uint8_t* imgBuffer = NULL;
@@ -79,7 +75,7 @@ void ensureNetwork() {
   r = sendAT("AT+CREG?", "OK", 2000);
   if (r.indexOf(",1") >= 0 || r.indexOf(",5") >= 0) {
     networkReady = true;
-    SerialMon.println("Network recovered!");
+    SerialMon.println("Network recovered");
   } else {
     SerialMon.println("Network recovery failed");
   }
@@ -96,223 +92,24 @@ String getModemTime() {
   return "";
 }
 
-// ── SMS Body Builders ───────────────────────────────────────
-String buildSMSAlert(String reason) {
-  if (reason.length() > 60) reason = reason.substring(0, 60);
-  String msg = "ALERT: " + reason;
-  if (gpsLat.length() > 0) {
-    msg += "\nLoc: " + gpsLat + "," + gpsLon;
-    msg += "\n" + gpsMapsLink;
-  }
-  if (msg.length() > 160) msg = msg.substring(0, 160);
-  return msg;
-}
-
-String buildSMSStatus(String status) {
-  String msg = "System " + status;
-  if (gpsLat.length() > 0) {
-    msg += "\nLoc: " + gpsLat + "," + gpsLon;
-    msg += "\n" + gpsMapsLink;
-  }
-  if (msg.length() > 160) msg = msg.substring(0, 160);
-  return msg;
-}
-
-// ── SMS via AT+CMGS (DISABLED) ──────────────────────────────
-// NOTE: CMGS is disabled because Hologram reports false success:
-// the modem returns "+CMGS: <ref>" / OK but no SMS is actually
-// delivered. Kept here verbatim for reference in case carrier
-// behavior changes — re-enable by removing the /* and */ wrappers.
-/*
-bool sendSMSviaCMGS(String message) {
-  SerialMon.println("[SMS-CMGS] Trying text-mode SMS...");
-  ensureNetwork();
-  if (!networkReady) {
-    SerialMon.println("[SMS-CMGS] No network");
-    return false;
-  }
-
-  while (SerialAT.available()) SerialAT.read();  // drain buffer
-
-  sendATWait("AT+CMGF=1", 2000);         // text mode
-  sendATWait("AT+CSCS=\"GSM\"", 2000);   // best-effort 7-bit
-
-  while (SerialAT.available()) SerialAT.read();  // drain again
-
-  SerialAT.print("AT+CMGS=\"");
-  SerialAT.print(OWNER_PHONE);
-  SerialAT.print("\"\r\n");
-
-  // Wait for '>' prompt (up to 5s)
-  unsigned long s = millis(); String r = "";
-  bool gotPrompt = false;
-  while (millis() - s < 5000) {
-    while (SerialAT.available()) r += (char)SerialAT.read();
-    if (r.indexOf(">") >= 0) { gotPrompt = true; break; }
-    if (r.indexOf("ERROR") >= 0) break;
-    delay(10);
-  }
-  if (!gotPrompt) {
-    SerialMon.println("[SMS-CMGS] No prompt, aborting. Buf: " + r);
-    SerialAT.write((uint8_t)0x1B);  // ESC abort
-    delay(500);
-    while (SerialAT.available()) SerialAT.read();
-    return false;
-  }
-
-  // Send body + Ctrl+Z
-  SerialAT.print(message);
-  SerialAT.write((uint8_t)0x1A);
-
-  // Wait up to 30s for +CMGS: or ERROR
-  s = millis(); r = "";
-  bool ok = false;
-  while (millis() - s < 30000) {
-    while (SerialAT.available()) r += (char)SerialAT.read();
-    if (r.indexOf("+CMGS:") >= 0) { ok = true; break; }
-    if (r.indexOf("ERROR") >= 0) break;
-    delay(50);
-  }
-
-  SerialMon.println("[SMS-CMGS] Response: " + r.substring(0, min((int)r.length(), 400)));
-  SerialMon.println(ok ? "[SMS-CMGS] SUCCESS" : "[SMS-CMGS] FAILED");
-  return ok;
-}
-*/
-
-// ── SMS via Hologram HTTP API (uses native HTTPS stack) ──────
-bool sendSMSviaHologramAPI(String message) {
-  SerialMon.println("[SMS-API] Trying Hologram HTTP API...");
-  ensureNetwork();
-  if (!networkReady) {
-    SerialMon.println("[SMS-API] No network");
-    return false;
-  }
-
-  // Escape JSON special chars: \, ", \n
-  String esc = "";
-  for (size_t i = 0; i < message.length(); i++) {
-    char c = message.charAt(i);
-    if (c == '\\') esc += "\\\\";
-    else if (c == '"') esc += "\\\"";
-    else if (c == '\n') esc += "\\n";
-    else if (c == '\r') esc += "\\r";
-    else esc += c;
-  }
-
-  String json = "{\"deviceid\":" + String(HOLOGRAM_DEVICE_ID) +
-                ",\"body\":\"" + esc +
-                "\",\"tonum\":\"" + String(OWNER_PHONE) + "\"}";
-
-  String url = "https://dashboard.hologram.io/api/1/sms/incoming?apikey=" +
-               String(HOLOGRAM_API_KEY);
-
-  sendATWait("AT+HTTPTERM", 2000);  // best-effort clear
-
-  String r = sendATWait("AT+HTTPINIT", 5000);
-  if (r.indexOf("OK") < 0) {
-    SerialMon.println("[SMS-API] HTTPINIT failed: " + r);
-    return false;
-  }
-
-  sendATWait("AT+HTTPPARA=\"CID\",1", 2000);
-  sendATWait("AT+HTTPPARA=\"URL\",\"" + url + "\"", 2000);
-  sendATWait("AT+HTTPPARA=\"CONTENT\",\"application/json\"", 2000);
-
-  // HTTPDATA: wait for DOWNLOAD prompt
-  SerialAT.println("AT+HTTPDATA=" + String(json.length()) + ",10000");
-  unsigned long s = millis(); String dr = "";
-  bool gotDownload = false;
-  while (millis() - s < 5000) {
-    while (SerialAT.available()) dr += (char)SerialAT.read();
-    if (dr.indexOf("DOWNLOAD") >= 0) { gotDownload = true; break; }
-    if (dr.indexOf("ERROR") >= 0) break;
-    delay(10);
-  }
-  if (!gotDownload) {
-    SerialMon.println("[SMS-API] No DOWNLOAD prompt: " + dr);
-    sendATWait("AT+HTTPTERM", 2000);
-    return false;
-  }
-
-  SerialAT.print(json);
-  // Wait for OK after body
-  s = millis(); dr = "";
-  while (millis() - s < 10000) {
-    while (SerialAT.available()) dr += (char)SerialAT.read();
-    if (dr.indexOf("OK") >= 0 || dr.indexOf("ERROR") >= 0) break;
-    delay(10);
-  }
-
-  // POST
-  SerialAT.println("AT+HTTPACTION=1");
-  s = millis(); String ar = "";
-  int statusCode = -1;
-  int respLen = 0;
-  while (millis() - s < 30000) {
-    while (SerialAT.available()) ar += (char)SerialAT.read();
-    int p = ar.indexOf("+HTTPACTION:");
-    if (p >= 0) {
-      int c1 = ar.indexOf(',', p);
-      int c2 = ar.indexOf(',', c1 + 1);
-      int eol = ar.indexOf('\n', c2 + 1);
-      if (c1 > 0 && c2 > c1 && eol > c2) {
-        statusCode = ar.substring(c1 + 1, c2).toInt();
-        respLen = ar.substring(c2 + 1, eol).toInt();
-        break;
-      }
-    }
-    delay(50);
-  }
-  // Log full HTTPACTION line for debugging
-  SerialMon.println("[SMS-API] HTTPACTION raw: " + ar);
-  SerialMon.println("[SMS-API] HTTPACTION status=" + String(statusCode) + " len=" + String(respLen));
-
-  // Read full body if present, for debug
-  if (respLen > 0) {
-    SerialAT.println("AT+HTTPREAD=0," + String(respLen));
-    unsigned long rs = millis(); String body = "";
-    while (millis() - rs < 5000) {
-      while (SerialAT.available()) body += (char)SerialAT.read();
-      if (body.indexOf("OK") >= 0) break;
-      delay(10);
-    }
-    SerialMon.println("[SMS-API] Body: " + body);
-  }
-
-  sendATWait("AT+HTTPTERM", 2000);
-
-  bool ok = (statusCode == 200 || statusCode == 201);
-  SerialMon.println(ok ? "[SMS-API] SUCCESS" : "[SMS-API] FAILED");
-  return ok;
-}
-
-// ── SMS Dispatcher ──────────────────────────────────────────
-bool sendSMS(String message) {
-  SerialMon.println("[SMS] Sending: " + message.substring(0, min((int)message.length(), 80)));
-  if (sendSMSviaHologramAPI(message)) return true;
-  SerialMon.println("[SMS] Hologram API failed");
-  return false;
-}
-
 // ── Setup ────────────────────────────────────────────────────
 void setup() {
   SerialMon.begin(115200);
   delay(1000);
-  SerialMon.println("\n=================================");
-  SerialMon.println(" Anti-Theft System - Phase 4b");
-  SerialMon.println("   LILYGO (Image + Notify)");
-  SerialMon.println("=================================\n");
+  SerialMon.println("\n====================================");
+  SerialMon.println("   Anti-Theft System");
+  SerialMon.println("   LILYGO - Cellular Gateway");
+  SerialMon.println("====================================\n");
 
   imgBuffer = (uint8_t*)malloc(IMG_BUF_SIZE);
-  SerialMon.println(imgBuffer ? "Image buffer OK" : "ERROR: Buffer failed!");
+  SerialMon.println(imgBuffer ? "Image buffer allocated (50 KB)" : "Image buffer allocation FAILED");
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH);
 
   Serial2.setRxBufferSize(1024);
   Serial2.begin(115200, SERIAL_8N1, MAIN_RX, MAIN_TX);
-  SerialMon.println("UART2 -> Main ESP32 (RX=21 TX=19)");
+  SerialMon.println("UART2  ->  Main ESP32");
 
   SerialMon.println("Powering on modem...");
   pinMode(MODEM_FLIGHT, OUTPUT); digitalWrite(MODEM_FLIGHT, HIGH);
@@ -330,8 +127,8 @@ void setup() {
     if (sendAT("AT","OK",1000).indexOf("OK") >= 0) { ok = true; break; }
     delay(1000);
   }
-  if (!ok) { SerialMon.println("Modem FAIL"); Serial2.println("LILYGO_ERROR"); return; }
-  SerialMon.println("Modem OK!");
+  if (!ok) { SerialMon.println("Modem not responding"); Serial2.println("LILYGO_ERROR"); return; }
+  SerialMon.println("Modem online");
 
   sendAT("ATE0","OK",1000);
   sendAT("AT+CGDCONT=1,\"IP\",\"" + String(APN) + "\"","OK",3000);
@@ -339,12 +136,12 @@ void setup() {
   for (int i = 0; i < 15; i++) {
     String r = sendAT("AT+CREG?","OK",2000);
     if (r.indexOf(",1") >= 0 || r.indexOf(",5") >= 0) {
-      SerialMon.println(" OK!");
+      SerialMon.println(" registered");
       sendATWait("AT+CGACT=1,1", 10000);
       sendATWait("AT+NETOPEN", 15000);
       delay(2000); while (SerialAT.available()) SerialAT.read();
       networkReady = true;
-      SerialMon.println("  Network ready!");
+      SerialMon.println("  Network ready");
       break;
     }
     SerialMon.print("."); delay(2000);
@@ -353,7 +150,7 @@ void setup() {
   sendATWait("AT+CGPS=1", 3000);
 
   Serial2.println("LILYGO_READY");
-  SerialMon.println("\n  Ready! Waiting for ALERT...\n");
+  SerialMon.println("\nSystem ready - awaiting alerts\n");
   digitalWrite(LED_PIN, LOW);
 }
 
@@ -364,7 +161,7 @@ void loop() {
 
     if (cmd.startsWith("ALERT:")) {
       String reason = cmd.substring(6);
-      SerialMon.println("ALERT! Reason: " + reason);
+      SerialMon.println("*** ALERT: " + reason + " ***");
       digitalWrite(LED_PIN, HIGH);
 
       // Wait for image data or NOIMG from Main ESP32
@@ -374,27 +171,27 @@ void loop() {
 
       bool success;
       if (hasImage && imgSize > 0) {
-        SerialMon.println("Sending with image (" + String(imgSize) + " bytes)...");
+        SerialMon.println("Sending alert + photo (" + String(imgSize) + " bytes)");
         success = sendWithImage(reason);
       } else {
-        SerialMon.println("Sending text only...");
+        SerialMon.println("Sending text-only alert");
         success = sendTextOnly(reason);
       }
 
       // Retry once on failure
       if (!success) {
-        SerialMon.println("Retrying in 3 seconds...");
+        SerialMon.println("Retrying in 3 seconds");
         delay(3000);
         success = (hasImage && imgSize > 0) ? sendWithImage(reason) : sendTextOnly(reason);
       }
 
       Serial2.println(success ? "LILYGO_OK: Notification sent" : "LILYGO_ERROR");
-      SerialMon.println(success ? "Sent!" : "Failed!");
+      SerialMon.println(success ? "Notification sent" : "Notification failed");
       digitalWrite(LED_PIN, LOW);
 
     } else if (cmd.startsWith("STATUS:")) {
       String status = cmd.substring(7);
-      SerialMon.println("Status: " + status);
+      SerialMon.println("State change: " + status);
       sendStatusNotification(status);
     }
   }
@@ -412,7 +209,7 @@ bool receiveImage() {
     if (Serial2.available()) {
       String line = Serial2.readStringUntil('\n'); line.trim();
 
-      if (line == "NOIMG") { SerialMon.println("  No image."); return false; }
+      if (line == "NOIMG") { SerialMon.println("  No photo - text only"); return false; }
 
       if (line.startsWith("IMG:")) {
         size_t expected = line.substring(4).toInt();
@@ -435,25 +232,22 @@ bool receiveImage() {
         delay(100);
         while (Serial2.available()) Serial2.readStringUntil('\n');
 
-        SerialMon.println("  Got " + String(imgSize) + "/" + String(expected));
+        SerialMon.println("  Received " + String(imgSize) + "/" + String(expected) + " bytes");
         return (imgSize == expected);
       }
     }
   }
-  SerialMon.println("  Image timeout");
+  SerialMon.println("  Photo receive timeout");
   return false;
 }
 
 // ── Send with Image (two notifications) ─────────────────────
 bool sendWithImage(String reason) {
-  // === SMS PRIMARY (best-effort, non-gating) ===
   if (gpsLat.length() == 0) updateGPS();
-  sendSMS(buildSMSAlert(reason));
 
-  // === NTFY FALLBACK / IMAGE DELIVERY (existing behavior) ===
   // === NOTIFICATION 1: Text alert with clickable Maps link ===
-  SerialMon.println("  [1/2] Sending text alert...");
-  
+  SerialMon.println("  [1/2] Text alert");
+
   String timestamp = getModemTime();
   String body = "**ALERT:** " + reason;
   if (timestamp.length() > 0) body += "\nTime: " + timestamp;
@@ -481,11 +275,11 @@ bool sendWithImage(String reason) {
   sendATWait("AT+CIPCLOSE=0", 5000);
   delay(500);
   while (SerialAT.available()) SerialAT.read();  // Drain remaining AT responses
-  SerialMon.println("  Waiting for battery recovery...");
+  SerialMon.println("  Battery recovery delay");
   delay(5000);  // Wait for 18650 battery voltage recovery before image upload
 
   // === NOTIFICATION 2: Image-only with minimal headers ===
-  SerialMon.println("  [2/2] Sending photo...");
+  SerialMon.println("  [2/2] Photo upload");
 
   // Keep headers minimal - let ntfy auto-detect the image
   String hdr = "PUT /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
@@ -502,7 +296,7 @@ bool sendWithImage(String reason) {
   if (!cipSend(hdr)) { sendATWait("AT+CIPCLOSE=0",5000); return false; }
 
   // Send image in 1KB chunks
-  SerialMon.println("  Uploading " + String(imgSize) + " bytes...");
+  SerialMon.println("  Uploading " + String(imgSize) + " bytes");
   size_t sent = 0;
   while (sent < imgSize) {
     size_t chunk = imgSize - sent;
@@ -545,7 +339,7 @@ bool tcpConnect() {
   while (SerialAT.available()) SerialAT.read();  // Drain stale AT buffer
   ensureNetwork();
   if (!networkReady) return false;
-  SerialMon.println("  Connecting...");
+  SerialMon.println("  Connecting to ntfy.sh");
   SerialAT.println("AT+CIPOPEN=0,\"TCP\",\"" + String(NTFY_IP) + "\",80");
   unsigned long s = millis(); String r = "";
   while (millis()-s < 15000) {
@@ -564,11 +358,11 @@ bool waitForResponse() {
   while (millis()-s < 20000) {
     while (SerialAT.available()) r += (char)SerialAT.read();
     if (r.indexOf("200 OK") >= 0) {
-      SerialMon.println("  [HTTP] OK. Response: " + r.substring(0, min((int)r.length(), 600)));
+      SerialMon.println("  HTTP OK");
       return true;
     }
     if (r.indexOf("HTTP/") >= 0 && r.indexOf(" 200") >= 0) {
-      SerialMon.println("  [HTTP] OK. Response: " + r.substring(0, min((int)r.length(), 600)));
+      SerialMon.println("  HTTP OK");
       return true;
     }
     if (r.indexOf("+IPCLOSE") >= 0 || r.indexOf("+CIPCLOSE") >= 0) break;
@@ -580,7 +374,7 @@ bool waitForResponse() {
     while (SerialAT.available()) r += (char)SerialAT.read();
     delay(50);
   }
-  SerialMon.println("  [HTTP] FAIL/timeout. Buffer: " + r.substring(0, min((int)r.length(), 600)));
+  SerialMon.println("  HTTP failed or timed out");
   return false;
 }
 
@@ -608,9 +402,7 @@ bool cipSend(String data) {
 
 // ── Text-Only Notification (fallback) ────────────────────────
 bool sendTextOnly(String reason) {
-  // SMS primary path (best-effort)
   if (gpsLat.length() == 0) updateGPS();
-  sendSMS(buildSMSAlert(reason));
 
   String timestamp = getModemTime();
   String body = "**ALERT:** " + reason;
@@ -635,10 +427,6 @@ bool sendTextOnly(String reason) {
 bool sendStatusNotification(String status) {
   updateGPS();
 
-  // === SMS PRIMARY ===
-  bool smsOk = sendSMS(buildSMSStatus(status));
-
-  // === NTFY FALLBACK (still runs, lightweight) ===
   String body = "System " + status;
   if (gpsLat.length() > 0) body += "\nLocation: " + gpsLat + "," + gpsLon;
 
@@ -657,7 +445,7 @@ bool sendStatusNotification(String status) {
     sendATWait("AT+CIPCLOSE=0", 5000);
   }
 
-  return smsOk || ntfyOk;
+  return ntfyOk;
 }
 
 // ── Heartbeat ───────────────────────────────────────────────

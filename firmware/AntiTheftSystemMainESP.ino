@@ -1,14 +1,14 @@
 /*
- * ANTI-THEFT SYSTEM — Phase 4b (Non-Blocking Alarm)
- * Main ESP32: Sensors + buffers photo + forwards to LILYGO
+ * ANTI-THEFT SYSTEM — Main ESP32
+ * Central coordinator: reads sensors, buffers photo from CAM, forwards to LILYGO.
  * Board: ESP32 Dev Module
- * 
- * Core 1 (main loop): RF remote, sensors, LED control — always responsive
- * Core 0 (alarm task): Photo capture, UART forwarding — runs in background
- * 
- * UART0 (Serial)  = USB debug
- * UART2 (Serial2) = ESP32-CAM (TX=17, RX=16)
- * UART1 (SerialLilyGO) = LILYGO (TX=27, RX=26)
+ *
+ * Core 1 (main loop): RF remote, sensors, LED control — always responsive.
+ * Core 0 (alarm task): Photo capture and UART forwarding run in background.
+ *
+ * UART0 (Serial)       = USB debug
+ * UART2 (Serial2)      = ESP32-CAM (TX=17, RX=16)
+ * UART1 (SerialLilyGO) = LILYGO    (TX=27, RX=26)
  */
 
 #include <RCSwitch.h>
@@ -51,16 +51,16 @@ void alarmTask(void* param);
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n=============================");
-  Serial.println(" Anti-Theft System - Phase 4b");
-  Serial.println("   Main ESP32 (Non-Blocking)");
-  Serial.println("=============================\n");
+  Serial.println("\n====================================");
+  Serial.println("   Anti-Theft System");
+  Serial.println("   Main ESP32");
+  Serial.println("====================================\n");
 
   imgBuffer = (uint8_t*)malloc(IMG_BUF_SIZE);
   if (imgBuffer) {
-    Serial.println("Image buffer: " + String(IMG_BUF_SIZE) + " bytes OK");
+    Serial.println("Image buffer allocated (50 KB)");
   } else {
-    Serial.println("ERROR: Buffer allocation failed!");
+    Serial.println("Image buffer allocation FAILED");
   }
 
   pinMode(VIBRATION_PIN, INPUT);
@@ -78,9 +78,9 @@ void setup() {
 
   lilygoMutex = xSemaphoreCreateMutex();
 
-  Serial.println("UART2 -> ESP32-CAM");
-  Serial.println("UART1 -> LILYGO (TX=27, RX=26)");
-  Serial.println("Status: DISARMED\n");
+  Serial.println("UART2  ->  ESP32-CAM");
+  Serial.println("UART1  ->  LILYGO");
+  Serial.println("System ready - DISARMED\n");
 }
 
 // ── Main Loop (Core 1) — Always responsive ──────────────────
@@ -93,7 +93,7 @@ void loop() {
       armed = true;
       digitalWrite(LED_GREEN, HIGH);
       digitalWrite(LED_RED, LOW);
-      Serial.println("ARMED");
+      Serial.println("System armed");
       if (xSemaphoreTake(lilygoMutex, pdMS_TO_TICKS(100))) {
         if (!alarmInProgress) SerialLilyGO.println("STATUS:ARMED");
         xSemaphoreGive(lilygoMutex);
@@ -102,7 +102,7 @@ void loop() {
       armed = false;
       digitalWrite(LED_GREEN, LOW);
       digitalWrite(LED_RED, HIGH);
-      Serial.println("DISARMED");
+      Serial.println("System disarmed");
       if (xSemaphoreTake(lilygoMutex, pdMS_TO_TICKS(100))) {
         if (!alarmInProgress) SerialLilyGO.println("STATUS:DISARMED");
         xSemaphoreGive(lilygoMutex);
@@ -140,8 +140,8 @@ void startAlarm(String reason) {
   lastAlarmTime = now;
 
   alarmInProgress = true;
-  Serial.println("ALARM! Reason: " + reason);
-  Serial.println("(Processing in background - remote still active)\n");
+  Serial.println("");
+  Serial.println("*** ALARM TRIGGERED: " + reason + " ***");
 
   // Launch alarm task on Core 0 with 16KB stack
   char* reasonCopy = strdup(reason.c_str());
@@ -161,24 +161,19 @@ void alarmTask(void* param) {
   String reason = (char*)param;
   free(param);
 
-  // Step 1: Send ALERT to LILYGO
-  Serial.println("Step 1: Sending ALERT to LILYGO...");
+  Serial.println("  -> Notifying LILYGO");
   xSemaphoreTake(lilygoMutex, portMAX_DELAY);
   SerialLilyGO.println("ALERT:" + reason);
   xSemaphoreGive(lilygoMutex);
 
-  // Step 2: Request photo from ESP32-CAM
-  Serial.println("Step 2: Requesting photo from ESP32-CAM...");
+  Serial.println("  -> Requesting photo");
   Serial2.println("PHOTO");
 
-  // Step 3: Buffer entire photo from CAM
-  Serial.println("Step 3: Buffering photo from CAM...");
   imgSize = 0;
   bool photoOK = receivePhotoFromCAM();
 
-  // Step 4: Forward photo to LILYGO (or send NOIMG)
   if (photoOK && imgSize > 0) {
-    Serial.println("Step 4: Forwarding " + String(imgSize) + " bytes to LILYGO...");
+    Serial.println("  -> Forwarding photo to LILYGO (" + String(imgSize) + " bytes)");
     xSemaphoreTake(lilygoMutex, portMAX_DELAY);
     SerialLilyGO.println("IMG:" + String(imgSize));
     delay(50);
@@ -195,16 +190,15 @@ void alarmTask(void* param) {
     delay(50);
     SerialLilyGO.println("IMG_END");
     xSemaphoreGive(lilygoMutex);
-    Serial.println("Photo forwarded!");
+    Serial.println("  -> Photo forwarded");
   } else {
-    Serial.println("Step 4: No photo, sending NOIMG");
+    Serial.println("  -> No photo available");
     xSemaphoreTake(lilygoMutex, portMAX_DELAY);
     SerialLilyGO.println("NOIMG");
     xSemaphoreGive(lilygoMutex);
   }
 
-  // Step 5: Wait for LILYGO response
-  Serial.println("Step 5: Waiting for LILYGO response...");
+  Serial.println("  -> Waiting for LILYGO");
   unsigned long timeout = millis() + 90000;
   while (millis() < timeout) {
     if (xSemaphoreTake(lilygoMutex, pdMS_TO_TICKS(50))) {
@@ -222,7 +216,7 @@ void alarmTask(void* param) {
     vTaskDelay(pdMS_TO_TICKS(10));  // Yield to other tasks
   }
 
-  Serial.println("Alarm processing complete.\n");
+  Serial.println("Alarm handled.\n");
   alarmInProgress = false;
 
   // Delete this task when done
@@ -250,7 +244,7 @@ bool receivePhotoFromCAM() {
               imgSize = 0;
               Serial.println("  Receiving " + String(expectedSize) + " bytes...");
             } else {
-              Serial.println("  ERROR: Bad size " + String(expectedSize));
+              Serial.println("  Invalid image size: " + String(expectedSize));
               return false;
             }
           }
@@ -271,7 +265,7 @@ bool receivePhotoFromCAM() {
             end.trim();
             if (end.length() > 0) Serial.println("  CAM: " + end);
           }
-          Serial.println("  Buffered: " + String(imgSize) + " bytes");
+          Serial.println("  Image buffered (" + String(imgSize) + " bytes)");
           return true;
         }
       }
@@ -280,9 +274,9 @@ bool receivePhotoFromCAM() {
   }
 
   if (gotHeader) {
-    Serial.println("  TIMEOUT: " + String(imgSize) + "/" + String(expectedSize));
+    Serial.println("  Photo timeout (" + String(imgSize) + "/" + String(expectedSize) + " bytes)");
   } else {
-    Serial.println("  TIMEOUT: No IMG header");
+    Serial.println("  Photo timeout (no header)");
   }
   return false;
 }

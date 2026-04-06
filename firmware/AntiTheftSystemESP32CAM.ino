@@ -1,12 +1,12 @@
 /*
- * ANTI-THEFT SYSTEM — Phase 4b (Image Transfer)
- * ESP32-CAM: Captures photo, saves to SD, sends over UART
+ * ANTI-THEFT SYSTEM — ESP32-CAM
+ * Captures photo on PHOTO command, saves to SD card, streams over UART.
  * Board: AI Thinker ESP32-CAM
- * 
+ *
  * Protocol on PHOTO command:
  *   1. "CAM_OK: Photo saved /photo_N.jpg (X KB)\n" (x3 burst)
- *   2. "IMG:12345\n"  (byte count of last photo)
- *   3. [raw JPEG bytes in 512-byte chunks]
+ *   2. "IMG:<byte-count>\n"
+ *   3. Raw JPEG bytes in 512-byte chunks
  *   4. "IMG_END\n"
  */
 
