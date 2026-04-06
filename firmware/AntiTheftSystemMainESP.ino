@@ -80,6 +80,32 @@ void setup() {
 
   Serial.println("UART2  ->  ESP32-CAM");
   Serial.println("UART1  ->  LILYGO");
+
+  // Wait for CAM_READY and LILYGO_READY (up to 25s). Prevents a first-alarm
+  // race where the user triggers a sensor before peripherals finish booting.
+  Serial.println("Waiting for peripherals...");
+  bool camReady = false, lilygoReady = false;
+  unsigned long bootDeadline = millis() + 25000;
+  while (millis() < bootDeadline && !(camReady && lilygoReady)) {
+    if (Serial2.available()) {
+      String line = Serial2.readStringUntil('\n'); line.trim();
+      if (line.length() > 0) {
+        Serial.println("  CAM: " + line);
+        if (line == "CAM_READY") camReady = true;
+      }
+    }
+    if (SerialLilyGO.available()) {
+      String line = SerialLilyGO.readStringUntil('\n'); line.trim();
+      if (line.length() > 0) {
+        Serial.println("  LILYGO: " + line);
+        if (line == "LILYGO_READY") lilygoReady = true;
+      }
+    }
+    delay(10);
+  }
+  if (!camReady)    Serial.println("  CAM did not report ready");
+  if (!lilygoReady) Serial.println("  LILYGO did not report ready");
+
   Serial.println("System ready - DISARMED\n");
 }
 
