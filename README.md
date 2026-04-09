@@ -24,7 +24,7 @@ The system uses three interconnected ESP32 boards communicating over UART at 115
                                              │ UART1
                                              │ TX=27 RX=26
                                      ┌───────▼──────────┐
-                                     │   LILYGO          │
+                                     │   LILYGO         │
                                      │   T-SIM7600G-H   │
                                      │                  │
                                      │ - Cellular modem │
