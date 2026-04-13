@@ -124,6 +124,9 @@ All UART communication runs at **115200 baud, 8N1**.
 | `LILYGO_READY` | Boot complete, modem + network initialized |
 | `LILYGO_OK: ...` | Notification sent successfully |
 | `LILYGO_ERROR` | Notification failed |
+| `REMOTE_ARM` | Remote arm command from web dashboard |
+| `REMOTE_DISARM` | Remote disarm command from web dashboard |
+| `REQUEST_PHOTO` | Photo request from web dashboard |
 
 ### Main ESP32 → ESP32-CAM
 
@@ -176,8 +179,35 @@ The system sends push notifications via [ntfy.sh](https://ntfy.sh):
 2. Subscribe to topic: `antitheft-gonnie-2219` (or change `NTFY_TOPIC` in the LILYGO firmware)
 3. Notifications include:
    - **ALERT** (urgent priority) — Alarm triggered with reason, timestamp, GPS location, Google Maps link, and photo
+   - **Requested Photo** (default priority) — User-requested photo from web dashboard
    - **STATUS** (low priority) — Arm/disarm state changes
+   - **Command Acknowledged** (low priority) — Confirmation of web dashboard commands
+   - **GPS Location** (low priority) — On-demand GPS response with map link
    - **Heartbeat** (min priority) — System health check every 6 hours
+4. Command topic: `antitheft-gonnie-2219-cmd` — used by the web dashboard to send commands (ARM, DISARM, GPS, PHOTO) to the LILYGO, which polls every 5 seconds
+
+### Web Dashboard
+
+The system includes a browser-based control panel deployed on Vercel:
+
+**Live URL:** [https://webapp-seven-livid-86.vercel.app](https://webapp-seven-livid-86.vercel.app)
+
+The dashboard connects to the ntfy.sh alert topic via **Server-Sent Events (SSE)** for real-time updates — no polling or refresh needed. When the SSE connection drops, a reconnect indicator appears automatically.
+
+1. Open the live URL (or `webapp/public/index.html` locally) in any browser
+2. Login with your credentials
+3. Features:
+   - **Arm / Disarm** — Remote control via ntfy command topic, with toast confirmation
+   - **Request GPS** — Get current location with Google Maps link
+   - **Request Photo** — Capture and view a photo on demand
+   - **Live map** — Auto-updating Leaflet/OpenStreetMap display
+   - **Notification feed** — Real-time scrollable list of all alerts and status updates with inline photos (capped at 50 items)
+   - **Email alerts** — Intrusion alerts are auto-forwarded to email via ntfy.sh (with loop-prevention tagging)
+
+**Deploy it yourself:**
+1. Fork this repository
+2. `cd webapp`
+3. `vercel --prod`
 
 ### Hologram SIM
 
@@ -200,7 +230,7 @@ The LILYGO board uses a [Hologram](https://hologram.io) IoT SIM card:
 ## Future Work
 
 - **AI image classification** — On-device or cloud-based image analysis to reduce false positives (e.g., distinguish a person from wind vibration)
-- **Two-way control** — Send commands back to the system via ntfy.sh (e.g., remote arm/disarm, request photo on demand)
+- ~~**Two-way control**~~ — ✅ Implemented: Web dashboard sends commands via ntfy.sh command topic, LILYGO polls and executes
 - **OTA firmware updates** — Enable over-the-air updates via cellular connection
 - **Battery monitoring** — Track and report vehicle battery voltage to detect disconnection attacks
 - **Multi-zone sensors** — Add additional vibration sensors or break-wire sensors for window/trunk coverage
@@ -214,6 +244,11 @@ AI-Anti-Theft-System-CAV/
 │   ├── AntiTheftSystemMainESP.ino      # Main ESP32 coordinator
 │   ├── AntiTheftSystemESP32CAM.ino     # ESP32-CAM photo capture
 │   └── AntiTheftSystemLilygo.ino       # LILYGO cellular gateway
+├── webapp/
+│   ├── public/
+│   │   └── index.html                  # Web dashboard (single file, no build tools)
+│   ├── package.json                    # Project metadata
+│   └── vercel.json                     # Vercel deployment config
 ├── docs/
 │   └── ARCHITECTURE.md                 # Detailed system architecture
 ├── .gitignore

@@ -1,0 +1,6 @@
+{
+  "name": "antitheft-dashboard",
+  "version": "1.0.0",
+  "description": "Anti-Theft System Dashboard — real-time monitoring via ntfy.sh",
+  "private": true
+}

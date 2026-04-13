@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Anti-Theft Dashboard</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+
+  /* Login */
+  #login { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  #login form { background: #1e293b; padding: 2rem; border-radius: 12px; width: 320px; }
+  #login h2 { text-align: center; margin-bottom: 1.5rem; color: #f8fafc; }
+  #login input { width: 100%; padding: 0.75rem; margin-bottom: 1rem; border: 1px solid #334155; border-radius: 8px; background: #0f172a; color: #e2e8f0; font-size: 1rem; }
+  #login button { width: 100%; padding: 0.75rem; border: none; border-radius: 8px; background: #3b82f6; color: #fff; font-size: 1rem; cursor: pointer; }
+  #login button:hover { background: #2563eb; }
+  #login-error { color: #f87171; text-align: center; margin-top: 0.5rem; display: none; }
+
+  /* Dashboard */
+  #dashboard { display: none; max-width: 600px; margin: 0 auto; padding: 1rem; }
+  header { text-align: center; padding: 1rem 0; }
+  header h1 { font-size: 1.5rem; color: #f8fafc; }
+
+  .status-card { text-align: center; padding: 1.5rem; border-radius: 12px; margin: 1rem 0; font-size: 1.25rem; font-weight: 700; }
+  .status-armed { background: #166534; color: #bbf7d0; }
+  .status-disarmed { background: #991b1b; color: #fecaca; }
+  .status-unknown { background: #334155; color: #94a3b8; }
+
+  .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin: 1rem 0; }
+  .controls button { padding: 1rem; border: none; border-radius: 10px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
+  .controls button:hover { opacity: 0.85; }
+  .controls button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-arm { background: #22c55e; color: #052e16; }
+  .btn-disarm { background: #ef4444; color: #fff; }
+  .btn-gps { background: #3b82f6; color: #fff; }
+  .btn-photo { background: #a855f7; color: #fff; }
+
+  #map { height: 300px; border-radius: 12px; margin: 1rem 0; z-index: 0; }
+
+  .feed { margin: 1rem 0; }
+  .feed h3 { margin-bottom: 0.75rem; color: #94a3b8; }
+  #feed-list { max-height: 400px; overflow-y: auto; }
+  .feed-item { background: #1e293b; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 0.5rem; border-left: 4px solid #334155; }
+  .feed-item.urgent { border-left-color: #ef4444; background: #1c1517; }
+  .feed-item.low { border-left-color: #3b82f6; }
+  .feed-item.min { border-left-color: #64748b; }
+  .feed-item .title { font-weight: 600; margin-bottom: 0.25rem; }
+  .feed-item .time { font-size: 0.75rem; color: #64748b; }
+  .feed-item .body { margin-top: 0.25rem; font-size: 0.9rem; color: #cbd5e1; white-space: pre-wrap; }
+  .feed-item img { max-width: 100%; border-radius: 8px; margin-top: 0.5rem; }
+  .email-badge { display: inline-block; margin-top: 0.4rem; padding: 0.15rem 0.5rem; border-radius: 4px; background: #1e40af; color: #93c5fd; font-size: 0.7rem; font-weight: 600; }
+
+  /* Toast */
+  #toast { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); background: #1e40af; color: #e0e7ff; padding: 0.6rem 1.2rem; border-radius: 8px; font-size: 0.85rem; font-weight: 600; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 9999; }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<!-- Login Screen -->
+<div id="login">
+  <form id="login-form">
+    <h2>Anti-Theft System</h2>
+    <input type="text" id="username" placeholder="Username" autocomplete="username" required>
+    <input type="password" id="password" placeholder="Password" autocomplete="current-password" required>
+    <button type="submit">Login</button>
+    <p id="login-error">Invalid credentials</p>
+  </form>
+</div>
+
+<!-- Dashboard -->
+<div id="dashboard">
+  <header><h1>Anti-Theft Dashboard</h1></header>
+
+  <div id="status-card" class="status-card status-unknown">Unknown</div>
+
+  <div class="controls">
+    <button class="btn-arm" onclick="sendCommand('ARM')">Arm</button>
+    <button class="btn-disarm" onclick="sendCommand('DISARM')">Disarm</button>
+    <button class="btn-gps" onclick="sendCommand('GPS')">Request GPS</button>
+    <button class="btn-photo" onclick="sendCommand('PHOTO')">Request Photo</button>
+  </div>
+
+  <div id="map"></div>
+
+  <div class="feed">
+    <h3>Notifications</h3>
+    <div id="feed-list"></div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const ALERT_TOPIC = 'antitheft-gonnie-2219';
+const CMD_TOPIC = 'antitheft-gonnie-2219-cmd';
+const EMAIL_TO = 'gonnie2219@gmail.com';
+const EXPECTED_HASH = '90508d9e1b28c32e484c03679d4939618ae1c31424a25a5f0483a93012be0a42';
+
+// --- Auth ---
+document.getElementById('login-form').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  const user = document.getElementById('username').value;
+  const pass = document.getElementById('password').value;
+  const data = new TextEncoder().encode(user + ':' + pass);
+  const hashBuf = await crypto.subtle.digest('SHA-256', data);
+  const hash = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+  if (hash === EXPECTED_HASH) {
+    document.getElementById('login').style.display = 'none';
+    document.getElementById('dashboard').style.display = 'block';
+    initDashboard();
+    setTimeout(function() { if (map) map.invalidateSize(); }, 200);
+  } else {
+    document.getElementById('login-error').style.display = 'block';
+  }
+});
+
+// --- Dashboard ---
+let map, marker;
+
+function initDashboard() {
+  map = L.map('map').setView([42.35, -83.07], 13);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+
+  // Connect to SSE stream for real-time notifications
+  const evtSource = new EventSource('https://ntfy.sh/' + ALERT_TOPIC + '/sse');
+  evtSource.addEventListener('message', function(e) {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.event !== 'message') return;
+      handleNotification(msg);
+    } catch (err) { /* ignore non-JSON */ }
+  });
+  evtSource.onerror = function() { showToast('Connection lost — reconnecting…'); };
+  evtSource.onopen = function() { showToast('Connected'); };
+}
+
+function handleNotification(msg) {
+  const title = msg.title || '';
+  const body = msg.message || '';
+  const priority = msg.priority || 3;
+  const tags = msg.tags || [];
+  const attachment = msg.attachment || null;
+
+  // Update armed/disarmed status
+  if (title.indexOf('ARMED') >= 0 && title.indexOf('DISARMED') < 0) updateStatus('ARMED');
+  else if (title.indexOf('DISARMED') >= 0) updateStatus('DISARMED');
+
+  // Update map if location found
+  const locMatch = body.match(/Location:\s*([-\d.]+),([-\d.]+)/);
+  if (locMatch) {
+    const lat = parseFloat(locMatch[1]);
+    const lon = parseFloat(locMatch[2]);
+    if (!isNaN(lat) && !isNaN(lon)) {
+      if (marker) marker.setLatLng([lat, lon]);
+      else marker = L.marker([lat, lon]).addTo(map);
+      map.setView([lat, lon], 15);
+    }
+  }
+
+  // Add to feed (get reference to the new feed item)
+  const feedItem = addFeedItem(title, body, priority, attachment);
+
+  // Send email for intrusion alerts only (skip if this message was our own email forward)
+  if ((title === 'Anti-Theft ALERT' || priority >= 5) && tags.indexOf('email-forwarded') < 0) {
+    sendEmailAlert(title, body, feedItem);
+  }
+}
+
+function updateStatus(status) {
+  const card = document.getElementById('status-card');
+  card.textContent = status;
+  card.className = 'status-card ' + (status === 'ARMED' ? 'status-armed' : 'status-disarmed');
+}
+
+function addFeedItem(title, body, priority, attachment) {
+  const list = document.getElementById('feed-list');
+  const item = document.createElement('div');
+  item.className = 'feed-item';
+  if (priority >= 5) item.className += ' urgent';
+  else if (priority <= 2) item.className += ' low';
+  if (priority <= 1) item.className += ' min';
+
+  const now = new Date().toLocaleTimeString();
+  let html = '<div class="title">' + escapeHtml(title || 'Notification') + '</div>';
+  html += '<div class="time">' + now + '</div>';
+  if (body) html += '<div class="body">' + escapeHtml(body) + '</div>';
+  if (attachment && attachment.url) {
+    html += '<img src="' + escapeHtml(attachment.url) + '" alt="Photo">';
+  }
+  item.innerHTML = html;
+  list.insertBefore(item, list.firstChild);
+  while (list.children.length > 50) list.removeChild(list.lastChild);
+  return item;
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// --- Email Alert via ntfy.sh Email header ---
+async function sendEmailAlert(title, body, feedItem) {
+  try {
+    const resp = await fetch('https://ntfy.sh/' + ALERT_TOPIC, {
+      method: 'POST',
+      headers: {
+        'Title': title,
+        'Priority': 'urgent',
+        'Tags': 'rotating_light,email-forwarded',
+        'Email': EMAIL_TO
+      },
+      body: body
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    // Add "Email sent" badge to the feed item
+    const badge = document.createElement('span');
+    badge.className = 'email-badge';
+    badge.textContent = 'Email sent ' + new Date().toLocaleTimeString();
+    feedItem.appendChild(badge);
+    showToast('Email alert sent to ' + EMAIL_TO);
+  } catch (err) {
+    const badge = document.createElement('span');
+    badge.className = 'email-badge';
+    badge.style.background = '#991b1b';
+    badge.style.color = '#fecaca';
+    badge.textContent = 'Email failed';
+    feedItem.appendChild(badge);
+  }
+}
+
+let toastTimer = null;
+function showToast(message) {
+  const toast = document.getElementById('toast');
+  toast.textContent = message;
+  toast.classList.add('show');
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(function() { toast.classList.remove('show'); toastTimer = null; }, 3000);
+}
+
+// --- Send Commands ---
+async function sendCommand(cmd) {
+  const btn = event.target;
+  btn.disabled = true;
+  try {
+    const resp = await fetch('https://ntfy.sh/' + CMD_TOPIC, {
+      method: 'POST',
+      body: cmd
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    showToast('Command sent: ' + cmd);
+  } catch (err) {
+    addFeedItem('Error', 'Failed to send command: ' + cmd, 3, null);
+  } finally {
+    setTimeout(function() { btn.disabled = false; }, 1500);
+  }
+}
+</script>
+</body>
+</html>

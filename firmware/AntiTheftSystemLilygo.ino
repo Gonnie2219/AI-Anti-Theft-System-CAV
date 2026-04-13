@@ -27,6 +27,7 @@
 
 const char APN[]        = "hologram";
 const char NTFY_TOPIC[] = "antitheft-gonnie-2219";
+const char CMD_TOPIC[]  = "antitheft-gonnie-2219-cmd";
 const char NTFY_IP[]    = "159.203.148.75";
 
 #define IMG_BUF_SIZE 51200
@@ -37,7 +38,10 @@ bool networkReady = false;
 String gpsLat = "", gpsLon = "", gpsMapsLink = "";
 unsigned long lastGPSUpdate = 0;
 unsigned long lastHeartbeat = 0;
+unsigned long lastPoll = 0;
+String lastPollId = "0";
 #define HEARTBEAT_MS 21600000  // 6 hours
+#define POLL_INTERVAL_MS 5000
 
 // ── AT Helpers ───────────────────────────────────────────────
 String sendAT(String cmd, String exp, unsigned long t) {
@@ -198,6 +202,7 @@ void loop() {
 
   if (millis() - lastGPSUpdate > 30000) { updateGPS(); lastGPSUpdate = millis(); }
   if (millis() - lastHeartbeat > HEARTBEAT_MS) { sendHeartbeat(); lastHeartbeat = millis(); }
+  if (millis() - lastPoll > POLL_INTERVAL_MS) { pollCommands(); lastPoll = millis(); }
 }
 
 // ── Receive Image from Main ESP32 ───────────────────────────
@@ -246,10 +251,11 @@ bool sendWithImage(String reason) {
   if (gpsLat.length() == 0) updateGPS();
 
   // === NOTIFICATION 1: Text alert with clickable Maps link ===
+  bool isRequested = (reason == "Photo Requested");
   SerialMon.println("  [1/2] Text alert");
 
   String timestamp = getModemTime();
-  String body = "**ALERT:** " + reason;
+  String body = isRequested ? "**Requested photo incoming.**" : ("**ALERT:** " + reason);
   if (timestamp.length() > 0) body += "\nTime: " + timestamp;
   if (gpsLat.length() > 0) {
     body += "\n\nLocation: " + gpsLat + "," + gpsLon;
@@ -259,9 +265,9 @@ bool sendWithImage(String reason) {
 
   String req = "POST /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
   req += "Host: ntfy.sh\r\n";
-  req += "Title: Anti-Theft ALERT\r\n";
-  req += "Priority: urgent\r\n";
-  req += "Tags: rotating_light\r\n";
+  req += "Title: " + String(isRequested ? "Requested Photo" : "Anti-Theft ALERT") + "\r\n";
+  req += "Priority: " + String(isRequested ? "default" : "urgent") + "\r\n";
+  req += "Tags: " + String(isRequested ? "camera" : "rotating_light") + "\r\n";
   req += "Markdown: yes\r\n";
   if (gpsMapsLink.length() > 0) req += "Click: " + gpsMapsLink + "\r\n";
   req += "Content-Length: " + String(body.length()) + "\r\n";
@@ -284,7 +290,7 @@ bool sendWithImage(String reason) {
   // Keep headers minimal - let ntfy auto-detect the image
   String hdr = "PUT /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
   hdr += "Host: ntfy.sh\r\n";
-  hdr += "Title: Photo Evidence\r\n";
+  hdr += "Title: " + String(isRequested ? "Requested Photo" : "Photo Evidence") + "\r\n";
   hdr += "Filename: alert.jpg\r\n";
   hdr += "Content-Length: " + String(imgSize) + "\r\n";
   hdr += "Connection: close\r\n\r\n";
@@ -331,6 +337,7 @@ bool sendWithImage(String reason) {
   if (!ok && sent >= imgSize) ok = true;
   delay(500);
   sendATWait("AT+CIPCLOSE=0", 5000);
+
   return ok;
 }
 
@@ -403,14 +410,18 @@ bool cipSend(String data) {
 // ── Text-Only Notification (fallback) ────────────────────────
 bool sendTextOnly(String reason) {
   if (gpsLat.length() == 0) updateGPS();
+  bool isRequested = (reason == "Photo Requested");
 
   String timestamp = getModemTime();
-  String body = "**ALERT:** " + reason;
+  String body = isRequested ? "**Requested photo** (no image available)." : ("**ALERT:** " + reason);
   if (timestamp.length() > 0) body += "\nTime: " + timestamp;
   if (gpsLat.length() > 0) body += "\n\nLocation: " + gpsLat + "," + gpsLon + "\n\n[View Location on Google Maps](" + gpsMapsLink + ")";
 
   String req = "POST /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
-  req += "Host: ntfy.sh\r\nTitle: Anti-Theft ALERT\r\nPriority: urgent\r\nTags: rotating_light\r\n";
+  req += "Host: ntfy.sh\r\n";
+  req += "Title: " + String(isRequested ? "Requested Photo" : "Anti-Theft ALERT") + "\r\n";
+  req += "Priority: " + String(isRequested ? "default" : "urgent") + "\r\n";
+  req += "Tags: " + String(isRequested ? "camera" : "rotating_light") + "\r\n";
   req += "Markdown: yes\r\n";
   if (gpsMapsLink.length() > 0) req += "Click: " + gpsMapsLink + "\r\n";
   req += "Content-Type: text/markdown\r\nContent-Length: " + String(body.length()) + "\r\nConnection: close\r\n\r\n" + body;
@@ -420,6 +431,7 @@ bool sendTextOnly(String reason) {
   bool ok = waitForResponse();
   delay(500);
   sendATWait("AT+CIPCLOSE=0", 5000);
+
   return ok;
 }
 
@@ -470,6 +482,111 @@ bool sendHeartbeat() {
   delay(500);
   sendATWait("AT+CIPCLOSE=0", 5000);
   SerialMon.println(ok ? "Heartbeat sent" : "Heartbeat failed");
+  return ok;
+}
+
+// ── Command Polling ──────────────────────────────────────────
+void pollCommands() {
+  if (!networkReady) return;
+  if (!tcpConnect()) return;
+
+  String req = "GET /" + String(CMD_TOPIC) + "/json?poll=1&since=" + lastPollId + " HTTP/1.1\r\n";
+  req += "Host: ntfy.sh\r\nConnection: close\r\n\r\n";
+
+  if (!cipSend(req)) { sendATWait("AT+CIPCLOSE=0", 5000); return; }
+
+  // Read full response (wait for close or 10s timeout)
+  unsigned long s = millis(); String resp = "";
+  while (millis() - s < 10000) {
+    while (SerialAT.available()) resp += (char)SerialAT.read();
+    if (resp.indexOf("+IPCLOSE") >= 0 || resp.indexOf("+CIPCLOSE") >= 0) break;
+    delay(50);
+  }
+  sendATWait("AT+CIPCLOSE=0", 5000);
+
+  // Parse JSON lines — look for "event":"message" lines
+  int searchFrom = 0;
+  while (true) {
+    int evtIdx = resp.indexOf("\"event\":\"message\"", searchFrom);
+    if (evtIdx < 0) break;
+
+    // Find message field near this event
+    int msgIdx = resp.indexOf("\"message\":\"", evtIdx);
+    if (msgIdx < 0) break;
+    int msgStart = msgIdx + 11;
+    int msgEnd = resp.indexOf("\"", msgStart);
+    if (msgEnd < 0) break;
+    String message = resp.substring(msgStart, msgEnd);
+
+    // Find id field near this event
+    int idIdx = resp.indexOf("\"id\":\"", evtIdx);
+    if (idIdx >= 0) {
+      int idStart = idIdx + 6;
+      int idEnd = resp.indexOf("\"", idStart);
+      if (idEnd > idStart) lastPollId = resp.substring(idStart, idEnd);
+    }
+
+    message.trim();
+    message.toUpperCase();
+    SerialMon.println("CMD: " + message);
+
+    if (message == "ARM") {
+      Serial2.println("REMOTE_ARM");
+      sendCommandAck("ARM command sent");
+    } else if (message == "DISARM") {
+      Serial2.println("REMOTE_DISARM");
+      sendCommandAck("DISARM command sent");
+    } else if (message == "GPS") {
+      updateGPS();
+      if (gpsLat.length() > 0) {
+        sendGPSResponse("Location: " + gpsLat + "," + gpsLon + "\n\n[View on Google Maps](" + gpsMapsLink + ")");
+      } else {
+        sendCommandAck("GPS fix not available");
+      }
+    } else if (message == "PHOTO") {
+      sendCommandAck("Photo request sent");
+      Serial2.println("REQUEST_PHOTO");
+    }
+
+    searchFrom = msgEnd + 1;
+  }
+}
+
+// ── Command Acknowledgement ─────────────────────────────────
+bool sendCommandAck(String msg) {
+  String req = "POST /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
+  req += "Host: ntfy.sh\r\n";
+  req += "Title: Command Acknowledged\r\n";
+  req += "Priority: low\r\n";
+  req += "Tags: white_check_mark\r\n";
+  req += "Content-Length: " + String(msg.length()) + "\r\n";
+  req += "Connection: close\r\n\r\n" + msg;
+
+  if (!tcpConnect()) return false;
+  if (!cipSend(req)) { sendATWait("AT+CIPCLOSE=0", 5000); return false; }
+  bool ok = waitForResponse();
+  delay(500);
+  sendATWait("AT+CIPCLOSE=0", 5000);
+  return ok;
+}
+
+// ── GPS Response ─────────────────────────────────────────────
+bool sendGPSResponse(String body) {
+  String req = "POST /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
+  req += "Host: ntfy.sh\r\n";
+  req += "Title: GPS Location\r\n";
+  req += "Priority: low\r\n";
+  req += "Tags: round_pushpin\r\n";
+  req += "Markdown: yes\r\n";
+  if (gpsMapsLink.length() > 0) req += "Click: " + gpsMapsLink + "\r\n";
+  req += "Content-Length: " + String(body.length()) + "\r\n";
+  req += "Connection: close\r\n\r\n" + body;
+
+  if (!tcpConnect()) return false;
+  if (!cipSend(req)) { sendATWait("AT+CIPCLOSE=0", 5000); return false; }
+  bool ok = waitForResponse();
+  delay(500);
+  sendATWait("AT+CIPCLOSE=0", 5000);
   return ok;
 }
 

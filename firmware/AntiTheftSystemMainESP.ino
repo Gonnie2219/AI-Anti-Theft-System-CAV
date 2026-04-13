@@ -136,6 +136,32 @@ void loop() {
     }
   }
 
+  // Drain LILYGO responses + handle remote arm/disarm (must run even when disarmed)
+  if (!alarmInProgress && xSemaphoreTake(lilygoMutex, pdMS_TO_TICKS(50))) {
+    if (SerialLilyGO.available()) {
+      String r = SerialLilyGO.readStringUntil('\n'); r.trim();
+      if (r.length() > 0) {
+        Serial.println("LILYGO: " + r);
+        if (r == "REMOTE_ARM" && !armed) {
+          armed = true;
+          digitalWrite(LED_GREEN, HIGH);
+          digitalWrite(LED_RED, LOW);
+          Serial.println("Remote armed");
+          SerialLilyGO.println("STATUS:ARMED");
+        } else if (r == "REMOTE_DISARM" && armed) {
+          armed = false;
+          digitalWrite(LED_GREEN, LOW);
+          digitalWrite(LED_RED, HIGH);
+          Serial.println("Remote disarmed");
+          SerialLilyGO.println("STATUS:DISARMED");
+        } else if (r == "REQUEST_PHOTO") {
+          startAlarm("Photo Requested");
+        }
+      }
+    }
+    xSemaphoreGive(lilygoMutex);
+  }
+
   if (!armed) return;
 
   // Sensors — only trigger if no alarm already in progress
@@ -147,15 +173,6 @@ void loop() {
     bool reed = digitalRead(REED_PIN);
     if (reed == HIGH && lastReed == LOW) startAlarm("Door Opened");
     lastReed = reed;
-  }
-
-  // Drain any LILYGO responses on main loop
-  if (!alarmInProgress && xSemaphoreTake(lilygoMutex, pdMS_TO_TICKS(50))) {
-    if (SerialLilyGO.available()) {
-      String r = SerialLilyGO.readStringUntil('\n'); r.trim();
-      if (r.length() > 0) Serial.println("LILYGO: " + r);
-    }
-    xSemaphoreGive(lilygoMutex);
   }
 }
 
