@@ -40,6 +40,8 @@ unsigned long lastGPSUpdate = 0;
 unsigned long lastHeartbeat = 0;
 unsigned long lastPoll = 0;
 String lastPollId = "0";
+String batteryPercent = "";
+String batteryVoltage = "";
 #define HEARTBEAT_MS 21600000  // 6 hours
 #define POLL_INTERVAL_MS 5000
 
@@ -93,6 +95,38 @@ String getModemTime() {
     int j = r.indexOf("\"", i + 8);
     if (j > i) return r.substring(i + 8, j);
   }
+  return "";
+}
+
+// ── Battery Level ───────────────────────────────────────────
+void getBatteryLevel() {
+  String r = sendAT("AT+CBC", "OK", 2000);
+  int i = r.indexOf("+CBC:");
+  if (i >= 0) {
+    // Format: +CBC: <bcs>,<bcl>,<voltage>
+    int c1 = r.indexOf(',', i);
+    int c2 = r.indexOf(',', c1 + 1);
+    if (c1 > 0 && c2 > c1) {
+      batteryPercent = r.substring(c1 + 1, c2);
+      batteryPercent.trim();
+      String mv = r.substring(c2 + 1);
+      // Trim to just digits (remove OK, newlines, etc)
+      String clean = "";
+      for (int j = 0; j < mv.length(); j++) {
+        if (isDigit(mv.charAt(j))) clean += mv.charAt(j);
+        else if (clean.length() > 0) break;
+      }
+      if (clean.length() > 0) {
+        float volts = clean.toFloat() / 1000.0;
+        batteryVoltage = String(volts, 1);
+      }
+    }
+  }
+}
+
+String getBatteryString() {
+  if (batteryPercent.length() > 0 && batteryVoltage.length() > 0)
+    return "\nBattery: " + batteryPercent + "% (" + batteryVoltage + "V)";
   return "";
 }
 
@@ -156,6 +190,29 @@ void setup() {
   Serial2.println("LILYGO_READY");
   SerialMon.println("\nSystem ready - awaiting alerts\n");
   digitalWrite(LED_PIN, LOW);
+
+  // Send startup notification with battery level
+  getBatteryLevel();
+  updateGPS();
+  String startBody = "System powered on and ready.";
+  String ts = getModemTime();
+  if (ts.length() > 0) startBody += "\nTime: " + ts;
+  if (gpsLat.length() > 0) startBody += "\nLocation: " + gpsLat + "," + gpsLon;
+  startBody += getBatteryString();
+
+  String startReq = "POST /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
+  startReq += "Host: ntfy.sh\r\nTitle: System Startup\r\n";
+  startReq += "Priority: low\r\nTags: rocket\r\n";
+  startReq += "Content-Type: text/plain\r\n";
+  startReq += "Content-Length: " + String(startBody.length()) + "\r\n";
+  startReq += "Connection: close\r\n\r\n" + startBody;
+
+  if (tcpConnect()) {
+    if (cipSend(startReq)) waitForResponse();
+    delay(500);
+    sendATWait("AT+CIPCLOSE=0", 5000);
+  }
+  lastHeartbeat = millis();
 }
 
 // ── Main Loop ────────────────────────────────────────────────
@@ -254,6 +311,7 @@ bool sendWithImage(String reason) {
   bool isRequested = (reason == "Photo Requested");
   SerialMon.println("  [1/2] Text alert");
 
+  getBatteryLevel();
   String timestamp = getModemTime();
   String body = isRequested ? "**Requested photo incoming.**" : ("**ALERT:** " + reason);
   if (timestamp.length() > 0) body += "\nTime: " + timestamp;
@@ -262,6 +320,7 @@ bool sendWithImage(String reason) {
     body += "\n\n[View Location on Google Maps](" + gpsMapsLink + ")";
   }
   body += "\n\nPhoto captured - see next notification.";
+  body += getBatteryString();
 
   String req = "POST /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
   req += "Host: ntfy.sh\r\n";
@@ -412,10 +471,12 @@ bool sendTextOnly(String reason) {
   if (gpsLat.length() == 0) updateGPS();
   bool isRequested = (reason == "Photo Requested");
 
+  getBatteryLevel();
   String timestamp = getModemTime();
   String body = isRequested ? "**Requested photo** (no image available)." : ("**ALERT:** " + reason);
   if (timestamp.length() > 0) body += "\nTime: " + timestamp;
   if (gpsLat.length() > 0) body += "\n\nLocation: " + gpsLat + "," + gpsLon + "\n\n[View Location on Google Maps](" + gpsMapsLink + ")";
+  body += getBatteryString();
 
   String req = "POST /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
   req += "Host: ntfy.sh\r\n";
@@ -439,8 +500,10 @@ bool sendTextOnly(String reason) {
 bool sendStatusNotification(String status) {
   updateGPS();
 
+  getBatteryLevel();
   String body = "System " + status;
   if (gpsLat.length() > 0) body += "\nLocation: " + gpsLat + "," + gpsLon;
+  body += getBatteryString();
 
   String req = "POST /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
   req += "Host: ntfy.sh\r\nTitle: System " + status + "\r\n";
@@ -463,10 +526,12 @@ bool sendStatusNotification(String status) {
 // ── Heartbeat ───────────────────────────────────────────────
 bool sendHeartbeat() {
   updateGPS();
+  getBatteryLevel();
   String timestamp = getModemTime();
   String body = "System online and monitoring.";
   if (timestamp.length() > 0) body += "\nTime: " + timestamp;
   if (gpsLat.length() > 0) body += "\nLocation: " + gpsLat + "," + gpsLon;
+  body += getBatteryString();
 
   String req = "POST /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
   req += "Host: ntfy.sh\r\nTitle: Heartbeat - System OK\r\n";

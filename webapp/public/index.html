@@ -28,6 +28,12 @@
   .status-disarmed { background: #991b1b; color: #fecaca; }
   .status-unknown { background: #334155; color: #94a3b8; }
 
+  .battery-widget { display: flex; align-items: center; justify-content: center; gap: 0.5rem; padding: 0.75rem; border-radius: 10px; margin: 0.5rem 0 1rem; font-weight: 600; font-size: 1rem; }
+  .battery-green { background: #14532d; color: #86efac; }
+  .battery-yellow { background: #713f12; color: #fde047; }
+  .battery-red { background: #7f1d1d; color: #fca5a5; }
+  .battery-gray { background: #1e293b; color: #64748b; }
+
   .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin: 1rem 0; }
   .controls button { padding: 1rem; border: none; border-radius: 10px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
   .controls button:hover { opacity: 0.85; }
@@ -75,6 +81,11 @@
   <header><h1>Anti-Theft Dashboard</h1></header>
 
   <div id="status-card" class="status-card status-unknown">Unknown</div>
+
+  <div id="battery-widget" class="battery-widget battery-gray">
+    <span class="batt-icon">🔋</span>
+    <span id="battery-text">Battery: --</span>
+  </div>
 
   <div class="controls">
     <button class="btn-arm" onclick="sendCommand('ARM')">Arm</button>
@@ -163,6 +174,16 @@ function handleNotification(msg) {
       else marker = L.marker([lat, lon]).addTo(map);
       map.setView([lat, lon], 15);
     }
+  }
+
+  // Update battery widget if battery info found
+  const battMatch = body.match(/Battery:\s*(\d+)%\s*\(([\d.]+)V\)/);
+  if (battMatch) {
+    const pct = parseInt(battMatch[1]);
+    const volts = battMatch[2];
+    document.getElementById('battery-text').textContent = 'Battery: ' + pct + '% (' + volts + 'V)';
+    const widget = document.getElementById('battery-widget');
+    widget.className = 'battery-widget ' + (pct >= 60 ? 'battery-green' : pct >= 30 ? 'battery-yellow' : 'battery-red');
   }
 
   // Add to feed (get reference to the new feed item)
