@@ -100,7 +100,9 @@ String getModemTime() {
 
 // ── Battery Level ───────────────────────────────────────────
 void getBatteryLevel() {
+  SerialMon.println("Testing battery...");
   String r = sendAT("AT+CBC", "OK", 2000);
+  SerialMon.println("AT+CBC raw: [" + r + "]");
   int i = r.indexOf("+CBC:");
   if (i >= 0) {
     // Format: +CBC: <bcs>,<bcl>,<voltage>
@@ -120,7 +122,10 @@ void getBatteryLevel() {
         float volts = clean.toFloat() / 1000.0;
         batteryVoltage = String(volts, 1);
       }
+      SerialMon.println("Battery parsed: " + batteryPercent + "% " + batteryVoltage + "V");
     }
+  } else {
+    SerialMon.println("AT+CBC: no +CBC in response");
   }
 }
 
