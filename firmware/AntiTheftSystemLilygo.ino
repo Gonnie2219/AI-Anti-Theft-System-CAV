@@ -99,34 +99,36 @@ String getModemTime() {
 }
 
 // ── Battery Level ───────────────────────────────────────────
+int voltageToPercent(float v) {
+  if (v >= 4.2) return 100;
+  if (v >= 4.0) return 75 + (v - 4.0) / (4.2 - 4.0) * 25;
+  if (v >= 3.8) return 50 + (v - 3.8) / (4.0 - 3.8) * 25;
+  if (v >= 3.6) return 25 + (v - 3.6) / (3.8 - 3.6) * 25;
+  if (v >= 3.3) return  5 + (v - 3.3) / (3.6 - 3.3) * 20;
+  if (v >= 3.0) return      (v - 3.0) / (3.3 - 3.0) *  5;
+  return 0;
+}
+
 void getBatteryLevel() {
-  SerialMon.println("Testing battery...");
   String r = sendAT("AT+CBC", "OK", 2000);
-  SerialMon.println("AT+CBC raw: [" + r + "]");
   int i = r.indexOf("+CBC:");
-  if (i >= 0) {
-    // Format: +CBC: <bcs>,<bcl>,<voltage>
-    int c1 = r.indexOf(',', i);
-    int c2 = r.indexOf(',', c1 + 1);
-    if (c1 > 0 && c2 > c1) {
-      batteryPercent = r.substring(c1 + 1, c2);
-      batteryPercent.trim();
-      String mv = r.substring(c2 + 1);
-      // Trim to just digits (remove OK, newlines, etc)
-      String clean = "";
-      for (int j = 0; j < mv.length(); j++) {
-        if (isDigit(mv.charAt(j))) clean += mv.charAt(j);
-        else if (clean.length() > 0) break;
-      }
-      if (clean.length() > 0) {
-        float volts = clean.toFloat() / 1000.0;
-        batteryVoltage = String(volts, 1);
-      }
-      SerialMon.println("Battery parsed: " + batteryPercent + "% " + batteryVoltage + "V");
-    }
-  } else {
-    SerialMon.println("AT+CBC: no +CBC in response");
+  if (i < 0) return;
+
+  // Extract substring after "+CBC:", strip to digits and '.'
+  String raw = r.substring(i + 5);
+  String clean = "";
+  for (int j = 0; j < (int)raw.length(); j++) {
+    char c = raw.charAt(j);
+    if (isDigit(c) || c == '.') clean += c;
+    else if (clean.length() > 0) break;
   }
+  if (clean.length() == 0) return;
+
+  float volts = clean.toFloat();
+  if (volts < 1.0 || volts > 5.0) return;  // sanity check
+
+  batteryVoltage = String(volts, 2);
+  batteryPercent = String(voltageToPercent(volts));
 }
 
 String getBatteryString() {
