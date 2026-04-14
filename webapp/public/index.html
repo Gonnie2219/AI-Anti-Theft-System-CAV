@@ -146,6 +146,34 @@ function initDashboard() {
     attribution: '&copy; OpenStreetMap contributors'
   }).addTo(map);
 
+  // Restore persisted state
+  lastKnownStatus = localStorage.getItem('lastKnownStatus');
+  var savedTime = localStorage.getItem('lastMessageTime');
+  if (savedTime) lastMessageTime = parseInt(savedTime);
+  if (lastKnownStatus) updateStatus(lastKnownStatus);
+
+  var savedBatt = localStorage.getItem('lastBattery');
+  if (savedBatt) {
+    document.getElementById('battery-text').textContent = 'Battery: ' + savedBatt;
+    var pctMatch = savedBatt.match(/(\d+)%/);
+    if (pctMatch) {
+      var pct = parseInt(pctMatch[1]);
+      document.getElementById('battery-widget').className = 'battery-widget ' + (pct >= 60 ? 'battery-green' : pct >= 30 ? 'battery-yellow' : 'battery-red');
+    }
+  }
+
+  var savedGPS = localStorage.getItem('lastGPS');
+  if (savedGPS) {
+    var parts = savedGPS.split(',');
+    var lat = parseFloat(parts[0]), lon = parseFloat(parts[1]);
+    if (!isNaN(lat) && !isNaN(lon)) {
+      marker = L.marker([lat, lon]).addTo(map);
+      map.setView([lat, lon], 15);
+    }
+  }
+
+  checkOfflineStatus();
+
   // Connect to SSE stream for real-time notifications
   const evtSource = new EventSource('https://ntfy.sh/' + ALERT_TOPIC + '/sse');
   evtSource.addEventListener('message', function(e) {
@@ -166,6 +194,7 @@ function initDashboard() {
 
 function handleNotification(msg) {
   lastMessageTime = Date.now();
+  localStorage.setItem('lastMessageTime', lastMessageTime);
 
   if (isOffline && lastKnownStatus) {
     updateStatus(lastKnownStatus);
@@ -190,6 +219,7 @@ function handleNotification(msg) {
       if (marker) marker.setLatLng([lat, lon]);
       else marker = L.marker([lat, lon]).addTo(map);
       map.setView([lat, lon], 15);
+      localStorage.setItem('lastGPS', lat + ',' + lon);
     }
   }
 
@@ -201,6 +231,7 @@ function handleNotification(msg) {
     document.getElementById('battery-text').textContent = 'Battery: ' + pct + '% (' + volts + 'V)';
     const widget = document.getElementById('battery-widget');
     widget.className = 'battery-widget ' + (pct >= 60 ? 'battery-green' : pct >= 30 ? 'battery-yellow' : 'battery-red');
+    localStorage.setItem('lastBattery', pct + '% (' + volts + 'V)');
   }
 
   // Add to feed (get reference to the new feed item)
@@ -217,6 +248,7 @@ function updateStatus(status) {
   card.textContent = status;
   card.className = 'status-card ' + (status === 'ARMED' ? 'status-armed' : 'status-disarmed');
   lastKnownStatus = status;
+  localStorage.setItem('lastKnownStatus', status);
   isOffline = false;
   document.getElementById('status-subtitle').textContent = '';
 }
