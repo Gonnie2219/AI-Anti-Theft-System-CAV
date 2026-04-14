@@ -78,16 +78,28 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
 | `CAM_ERROR: ...` | Error |
 
 ## Web Dashboard (`webapp/public/index.html`)
-- **Role:** Browser-based control panel — arm/disarm, request GPS/photo, view live alerts
+- **Role:** Browser-based control panel — arm/disarm, request GPS/photo, view live alerts with AI threat analysis
 - **Live URL:** https://webapp-seven-livid-86.vercel.app
-- **Deployment:** Vercel static site — `webapp/` is the project root, `public/` is the output directory
+- **Deployment:** Vercel — `webapp/` is the project root, `public/` is the static output directory, `api/` contains serverless functions
 - **Auth:** Client-side SHA-256 hash of username:password
-- **Commands:** POSTs command text (ARM, DISARM, GPS, PHOTO) to `antitheft-gonnie-2219-cmd` ntfy topic. Buttons show visual feedback (spinner/checkmark) and a toast notification on success.
-- **Live feed:** SSE subscription to `antitheft-gonnie-2219` alert topic for real-time notifications. Feed is capped at 50 items to prevent memory bloat. SSE reconnect indicator appears when the connection drops.
-- **Email alerts:** On intrusion alerts (title "Anti-Theft ALERT" or priority >= 5), POSTs to ntfy.sh with `Email:` header to forward alert to email. Uses `email-forwarded` tag to prevent re-triggering the email forward on the same notification. Shows "Email sent" badge on the feed item and a toast notification.
-- **Map:** Leaflet + OpenStreetMap, updates marker from GPS coordinates in notification bodies
-- **Photo display:** Inline images from ntfy attachment URLs
-- **External deps:** Leaflet 1.9.4 (CDN), OpenStreetMap tiles
+- **Commands:** POSTs command text (ARM, DISARM, GPS, PHOTO) to `antitheft-gonnie-2219-cmd` ntfy topic. Buttons have Unicode icons and show toast notification on success.
+- **Live feed:** SSE subscription to `antitheft-gonnie-2219` alert topic for real-time notifications. Feed is capped at 50 items. Slide-in animation on new items. SSE reconnect indicator on connection drop.
+- **Battery monitoring:** Color-coded widget (green ≥60%, yellow ≥30%, red <30%) parsed from AT+CBC voltage-based estimation in notification bodies.
+- **Online/offline detection:** Tracks `lastMessageTime`. After 3 minutes of silence, shows "SYSTEM OFFLINE" with last-known status and minutes since last seen. Checked every 30 seconds.
+- **localStorage persistence:** Saves and restores: armed/disarmed status, battery level, GPS coordinates, and last message timestamp across page refreshes.
+- **AI threat classification:** When a photo attachment arrives (title contains "Photo Evidence" or filename is `alert.jpg`), the dashboard POSTs the image URL to `/api/analyze` (Vercel serverless function). The function uses the Anthropic Claude Vision API to classify the image as HIGH/MEDIUM/LOW threat with a text verdict. Result is displayed as a color-coded badge on the feed item.
+- **Photo interaction:** Images are wrapped in a `.photo-wrap` container with a download button overlay. Clicking an image opens a full-screen lightbox overlay (click to dismiss).
+- **Markdown rendering:** `formatBody()` converts `**bold**` → `<strong>`, `[text](url)` → clickable links, and bare GPS coordinate pairs → Google Maps links.
+- **Email alerts:** On intrusion alerts (title "Anti-Theft ALERT" or priority >= 5), POSTs to ntfy.sh with `Email:` header. Uses `email-forwarded` tag to prevent loops. Shows "Email sent" badge.
+- **Map:** Leaflet + OpenStreetMap, auto-updates marker from GPS coordinates in notification bodies.
+- **External deps:** Leaflet 1.9.4 (CDN), OpenStreetMap tiles, @anthropic-ai/sdk (server-side)
+
+### AI Analysis Endpoint (`webapp/api/analyze.js`)
+- **Role:** Vercel serverless function that classifies photos using Anthropic Claude Vision API
+- **Input:** POST with JSON body `{ imageUrl: "..." }`
+- **Process:** Fetches the image, sends it to Claude with a security-focused prompt asking for threat classification
+- **Output:** JSON `{ threatLevel: "HIGH"|"MEDIUM"|"LOW", verdict: "..." }`
+- **Auth:** Uses `ANTHROPIC_API_KEY` environment variable (set in Vercel project settings)
 
 ## Key Parameters
 | Parameter | Value | Location |

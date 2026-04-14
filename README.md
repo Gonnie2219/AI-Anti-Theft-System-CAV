@@ -200,8 +200,14 @@ The dashboard connects to the ntfy.sh alert topic via **Server-Sent Events (SSE)
    - **Arm / Disarm** — Remote control via ntfy command topic, with toast confirmation
    - **Request GPS** — Get current location with Google Maps link
    - **Request Photo** — Capture and view a photo on demand
-   - **Live map** — Auto-updating Leaflet/OpenStreetMap display
-   - **Notification feed** — Real-time scrollable list of all alerts and status updates with inline photos (capped at 50 items)
+   - **Live map** — Auto-updating Leaflet/OpenStreetMap display with GPS pin
+   - **Notification feed** — Real-time SSE-powered scrollable list with slide-in animations (capped at 50 items)
+   - **Battery monitoring** — Color-coded widget (green/yellow/red) with voltage-based estimation from AT+CBC
+   - **Online/offline detection** — 2-minute heartbeat monitoring, shows "SYSTEM OFFLINE" after 3 minutes of silence with last-known status
+   - **localStorage persistence** — Dashboard state (status, battery, GPS, last seen time) persists across page refreshes
+   - **AI threat classification** — Photos are analyzed by Anthropic Claude Vision API via Vercel serverless function (`/api/analyze`), returning HIGH/MEDIUM/LOW threat levels with reasoning
+   - **Photo lightbox** — Click any photo to view full-screen overlay; download button on each image
+   - **Markdown rendering** — `**bold**` text, `[text](url)` links, and bare GPS coordinates auto-link to Google Maps
    - **Email alerts** — Intrusion alerts are auto-forwarded to email via ntfy.sh (with loop-prevention tagging)
 
 **Deploy it yourself:**
@@ -221,7 +227,6 @@ The LILYGO board uses a [Hologram](https://hologram.io) IoT SIM card:
 
 | Issue | Details | Workaround |
 |-------|---------|------------|
-| **GPIO 25 dead on LILYGO** | GPIO 25 is documented as MODEM_FLIGHT for the T-SIM7600G-H. On some units this pin may not toggle correctly. | Set `MODEM_FLIGHT` HIGH in setup and leave it; do not toggle at runtime. |
 | **No DNS on SIM7600** | The SIM7600 modem's `AT+CIPOPEN` command does not reliably resolve hostnames. | `NTFY_IP` is hardcoded to `159.203.148.75` (ntfy.sh). If ntfy.sh changes IP, update this constant. |
 | **ntfy email delivery requires auth** | Sending notifications via ntfy.sh email forwarding requires an authenticated ntfy account. | Use phone push notifications (no auth required) instead of email forwarding. |
 | **50KB image buffer limit** | Images larger than 50KB are rejected. VGA quality 10 JPEG typically produces 15-40KB images. | If images are consistently too large, reduce `FRAMESIZE_VGA` to `FRAMESIZE_CIF` or increase `jpeg_quality` number (lower quality). |
@@ -229,10 +234,10 @@ The LILYGO board uses a [Hologram](https://hologram.io) IoT SIM card:
 
 ## Future Work
 
-- **AI image classification** — On-device or cloud-based image analysis to reduce false positives (e.g., distinguish a person from wind vibration)
+- ~~**AI image classification**~~ — ✅ Implemented: Anthropic Claude Vision API analyzes photos via Vercel serverless function, returns HIGH/MEDIUM/LOW threat level with reasoning
 - ~~**Two-way control**~~ — ✅ Implemented: Web dashboard sends commands via ntfy.sh command topic, LILYGO polls and executes
 - **OTA firmware updates** — Enable over-the-air updates via cellular connection
-- **Battery monitoring** — Track and report vehicle battery voltage to detect disconnection attacks
+- ~~**Battery monitoring**~~ — ✅ Implemented: AT+CBC voltage-based battery estimation with color-coded dashboard widget
 - **Multi-zone sensors** — Add additional vibration sensors or break-wire sensors for window/trunk coverage
 - **Encrypted communication** — Add HTTPS/TLS support when using a modem with TLS capability
 
@@ -245,9 +250,11 @@ AI-Anti-Theft-System-CAV/
 │   ├── AntiTheftSystemESP32CAM.ino     # ESP32-CAM photo capture
 │   └── AntiTheftSystemLilygo.ino       # LILYGO cellular gateway
 ├── webapp/
+│   ├── api/
+│   │   └── analyze.js                  # AI photo analysis (Vercel serverless function)
 │   ├── public/
 │   │   └── index.html                  # Web dashboard (single file, no build tools)
-│   ├── package.json                    # Project metadata
+│   ├── package.json                    # Project metadata + Anthropic SDK dependency
 │   └── vercel.json                     # Vercel deployment config
 ├── docs/
 │   └── ARCHITECTURE.md                 # Detailed system architecture
