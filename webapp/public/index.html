@@ -156,7 +156,10 @@ function initDashboard() {
     } catch (err) { /* ignore non-JSON */ }
   });
   evtSource.onerror = function() { showToast('Connection lost — reconnecting…'); };
-  evtSource.onopen = function() { showToast('Connected'); };
+  evtSource.onopen = function() {
+    showToast('Connected');
+    if (lastKnownStatus && !isOffline) updateStatus(lastKnownStatus);
+  };
 
   setInterval(checkOfflineStatus, 30000);
 }
@@ -227,7 +230,9 @@ function checkOfflineStatus() {
     card.textContent = 'SYSTEM OFFLINE';
     card.className = 'status-card status-offline';
     const mins = Math.floor(elapsed / 60000);
-    document.getElementById('status-subtitle').textContent = 'Last seen: ' + mins + ' min ago';
+    var subtitle = 'Last seen: ' + mins + ' min ago';
+    if (lastKnownStatus) subtitle += ' · Last known: ' + lastKnownStatus;
+    document.getElementById('status-subtitle').textContent = subtitle;
   }
 }
 
