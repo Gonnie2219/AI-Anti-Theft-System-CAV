@@ -42,7 +42,7 @@ unsigned long lastPoll = 0;
 String lastPollId = "0";
 String batteryPercent = "";
 String batteryVoltage = "";
-#define HEARTBEAT_MS 21600000  // 6 hours
+#define HEARTBEAT_MS 120000  // 2 minutes
 #define POLL_INTERVAL_MS 5000
 
 // ── AT Helpers ───────────────────────────────────────────────
