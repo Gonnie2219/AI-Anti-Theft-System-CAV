@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Anti-Theft Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔒</text></svg>">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -19,7 +20,7 @@
   #login-error { color: #f87171; text-align: center; margin-top: 0.5rem; display: none; }
 
   /* Dashboard */
-  #dashboard { display: none; max-width: 600px; margin: 0 auto; padding: 1rem; }
+  #dashboard { display: none; max-width: 800px; margin: 0 auto; padding: 1rem; }
   header { text-align: center; padding: 1rem 0; }
   header h1 { font-size: 1.5rem; color: #f8fafc; }
 
@@ -45,20 +46,43 @@
   .btn-gps { background: #3b82f6; color: #fff; }
   .btn-photo { background: #a855f7; color: #fff; }
 
-  #map { height: 300px; border-radius: 12px; margin: 1rem 0; z-index: 0; }
+  #map { height: 400px; border-radius: 12px; margin: 1rem 0; z-index: 0; }
 
   .feed { margin: 1rem 0; }
   .feed h3 { margin-bottom: 0.75rem; color: #94a3b8; }
-  #feed-list { max-height: 400px; overflow-y: auto; }
+  #feed-list { max-height: 600px; overflow-y: auto; }
   .feed-item { background: #1e293b; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 0.5rem; border-left: 4px solid #334155; }
   .feed-item.urgent { border-left-color: #ef4444; background: #1c1517; }
   .feed-item.low { border-left-color: #3b82f6; }
   .feed-item.min { border-left-color: #64748b; }
-  .feed-item .title { font-weight: 600; margin-bottom: 0.25rem; }
+  .feed-item .title { font-weight: 600; margin-bottom: 0.25rem; font-size: 1.05rem; }
   .feed-item .time { font-size: 0.75rem; color: #64748b; }
   .feed-item .body { margin-top: 0.25rem; font-size: 0.9rem; color: #cbd5e1; white-space: pre-wrap; }
-  .feed-item img { max-width: 100%; border-radius: 8px; margin-top: 0.5rem; }
+  .feed-item img { width: 100%; border-radius: 8px; margin-top: 0.5rem; }
+  .feed-item.gps { border-left-color: #3b82f6; }
+
+  @keyframes slideIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+  .feed-item { animation: slideIn 0.3s ease-out; }
+
+  .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.9); display: flex; align-items: center; justify-content: center; z-index: 10000; cursor: zoom-out; }
+  .lightbox img { max-width: 95vw; max-height: 95vh; border-radius: 8px; }
+
+  .photo-wrap { position: relative; display: inline-block; width: 100%; margin-top: 0.5rem; }
+  .photo-wrap img { width: 100%; border-radius: 8px; cursor: zoom-in; }
+  .btn-download { position: absolute; top: 0.5rem; right: 0.5rem; background: rgba(0,0,0,0.6); color: #fff; border: none; border-radius: 6px; padding: 0.3rem 0.5rem; cursor: pointer; font-size: 1rem; }
+  .btn-download:hover { background: rgba(0,0,0,0.8); }
+
+  @media (max-width: 640px) {
+    #dashboard { padding: 0.5rem; }
+    .controls button { padding: 0.75rem; font-size: 0.9rem; }
+    #map { height: 300px; }
+  }
   .email-badge { display: inline-block; margin-top: 0.4rem; padding: 0.15rem 0.5rem; border-radius: 4px; background: #1e40af; color: #93c5fd; font-size: 0.7rem; font-weight: 600; }
+  .ai-verdict { display: inline-block; margin-top: 0.5rem; padding: 0.4rem 0.75rem; border-radius: 6px; font-size: 0.8rem; font-weight: 600; }
+  .ai-verdict.threat-high { background: #991b1b; color: #fca5a5; }
+  .ai-verdict.threat-medium { background: #854d0e; color: #fde047; }
+  .ai-verdict.threat-low { background: #14532d; color: #86efac; }
+  .ai-verdict.threat-loading { background: #1e293b; color: #94a3b8; }
 
   /* Toast */
   #toast { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); background: #1e40af; color: #e0e7ff; padding: 0.6rem 1.2rem; border-radius: 8px; font-size: 0.85rem; font-weight: 600; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 9999; }
@@ -91,10 +115,10 @@
   </div>
 
   <div class="controls">
-    <button class="btn-arm" onclick="sendCommand('ARM')">Arm</button>
-    <button class="btn-disarm" onclick="sendCommand('DISARM')">Disarm</button>
-    <button class="btn-gps" onclick="sendCommand('GPS')">Request GPS</button>
-    <button class="btn-photo" onclick="sendCommand('PHOTO')">Request Photo</button>
+    <button class="btn-arm" onclick="sendCommand('ARM')">🛡️ Arm</button>
+    <button class="btn-disarm" onclick="sendCommand('DISARM')">🔓 Disarm</button>
+    <button class="btn-gps" onclick="sendCommand('GPS')">📍 Request GPS</button>
+    <button class="btn-photo" onclick="sendCommand('PHOTO')">📷 Request Photo</button>
   </div>
 
   <div id="map"></div>
@@ -237,6 +261,11 @@ function handleNotification(msg) {
   // Add to feed (get reference to the new feed item)
   const feedItem = addFeedItem(title, body, priority, attachment);
 
+  // AI-analyze photos
+  if (attachment && attachment.url && (title.indexOf('Photo Evidence') >= 0 || (attachment.name && attachment.name === 'alert.jpg'))) {
+    analyzePhoto(attachment.url, feedItem);
+  }
+
   // Send email for intrusion alerts only (skip if this message was our own email forward)
   if ((title === 'Anti-Theft ALERT' || priority >= 5) && tags.indexOf('email-forwarded') < 0) {
     sendEmailAlert(title, body, feedItem);
@@ -268,6 +297,17 @@ function checkOfflineStatus() {
   }
 }
 
+function formatBody(text) {
+  let s = escapeHtml(text);
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" style="color:#60a5fa">$1</a>');
+  s = s.replace(/(^|[\s,])([-]?\d{1,3}\.\d{3,},\s?[-]?\d{1,3}\.\d{3,})/g, function(match, pre, coords) {
+    var c = coords.replace(/\s/g, '');
+    return pre + '<a href="https://www.google.com/maps?q=' + c + '" target="_blank" style="color:#60a5fa">' + coords + '</a>';
+  });
+  return s;
+}
+
 function addFeedItem(title, body, priority, attachment) {
   const list = document.getElementById('feed-list');
   const item = document.createElement('div');
@@ -275,19 +315,33 @@ function addFeedItem(title, body, priority, attachment) {
   if (priority >= 5) item.className += ' urgent';
   else if (priority <= 2) item.className += ' low';
   if (priority <= 1) item.className += ' min';
+  if (title && (title.indexOf('GPS') >= 0 || title.indexOf('Location') >= 0)) item.className += ' gps';
 
   const now = new Date().toLocaleTimeString();
   let html = '<div class="title">' + escapeHtml(title || 'Notification') + '</div>';
   html += '<div class="time">' + now + '</div>';
-  if (body) html += '<div class="body">' + escapeHtml(body) + '</div>';
+  if (body) html += '<div class="body">' + formatBody(body) + '</div>';
   if (attachment && attachment.url) {
-    html += '<img src="' + escapeHtml(attachment.url) + '" alt="Photo">';
+    const safeUrl = escapeHtml(attachment.url);
+    html += '<div class="photo-wrap">';
+    html += '<img src="' + safeUrl + '" alt="Photo" onclick="openLightbox(\'' + safeUrl + '\')">';
+    html += '<button class="btn-download" onclick="event.stopPropagation(); window.open(\'' + safeUrl + '\', \'_blank\')" title="Download">⬇</button>';
+    html += '</div>';
   }
   item.innerHTML = html;
   list.insertBefore(item, list.firstChild);
   while (list.children.length > 50) list.removeChild(list.lastChild);
   return item;
 }
+
+function openLightbox(src) {
+  const overlay = document.createElement('div');
+  overlay.className = 'lightbox';
+  overlay.onclick = function() { document.body.removeChild(overlay); };
+  overlay.innerHTML = '<img src="' + src + '" alt="Full photo">';
+  document.body.appendChild(overlay);
+}
+
 
 function escapeHtml(text) {
   const div = document.createElement('div');
@@ -322,6 +376,27 @@ async function sendEmailAlert(title, body, feedItem) {
     badge.style.color = '#fecaca';
     badge.textContent = 'Email failed';
     feedItem.appendChild(badge);
+  }
+}
+
+async function analyzePhoto(imageUrl, feedItem) {
+  const badge = document.createElement('div');
+  badge.className = 'ai-verdict threat-loading';
+  badge.textContent = 'AI Analyzing...';
+  feedItem.appendChild(badge);
+  try {
+    const resp = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imageUrl: imageUrl })
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    badge.className = 'ai-verdict threat-' + data.threatLevel.toLowerCase();
+    badge.textContent = data.threatLevel + ': ' + data.verdict;
+  } catch (err) {
+    badge.className = 'ai-verdict threat-loading';
+    badge.textContent = 'AI analysis unavailable';
   }
 }
 

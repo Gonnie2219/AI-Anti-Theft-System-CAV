@@ -2,5 +2,8 @@
   "name": "antitheft-dashboard",
   "version": "1.0.0",
   "description": "Anti-Theft System Dashboard — real-time monitoring via ntfy.sh",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0"
+  }
 }
