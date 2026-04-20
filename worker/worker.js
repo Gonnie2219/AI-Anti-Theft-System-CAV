@@ -5,7 +5,8 @@
  * Deployed with cron trigger (every minute).
  *
  * Required secrets (set via `wrangler secret put`):
- *   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM, TWILIO_TO, NTFY_TOPIC
+ *   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM, TWILIO_TO, NTFY_TOPIC,
+ *   ANALYZE_URL (Vercel /api/analyze endpoint)
  *
  * KV namespace binding: ANTITHEFT_STATE
  */
@@ -52,7 +53,13 @@ async function handleCron(env) {
         ? matchedPhoto.attachment.url
         : null;
 
-    const message = formatWhatsAppMessage(alert);
+    // Run AI analysis on the photo if available
+    let aiVerdict = null;
+    if (mediaUrl && env.ANALYZE_URL) {
+      aiVerdict = await analyzePhoto(env.ANALYZE_URL, mediaUrl);
+    }
+
+    const message = formatWhatsAppMessage(alert, aiVerdict);
     const success = await sendWhatsApp(env, message, mediaUrl);
 
     if (!success) {
@@ -157,7 +164,28 @@ async function sendWhatsApp(env, message, mediaUrl) {
   return true;
 }
 
-function formatWhatsAppMessage(alert) {
+async function analyzePhoto(analyzeUrl, imageUrl) {
+  try {
+    const resp = await fetch(analyzeUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ imageUrl }),
+    });
+    if (!resp.ok) {
+      console.error(`Analyze API error: ${resp.status}`);
+      return null;
+    }
+    const data = await resp.json();
+    return data.threatLevel && data.verdict
+      ? `${data.threatLevel}: ${data.verdict}`
+      : null;
+  } catch (err) {
+    console.error(`Analyze failed: ${err.message}`);
+    return null;
+  }
+}
+
+function formatWhatsAppMessage(alert, aiVerdict) {
   const body = alert.message || "";
   const lines = body.split("\n");
 
@@ -190,7 +218,10 @@ function formatWhatsAppMessage(alert) {
   if (mapsUrl) {
     msg += `\n${mapsUrl}`;
   }
+  if (aiVerdict) {
+    msg += `\n\n🤖 AI Analysis: ${aiVerdict}`;
+  }
 
-  // Keep under 500 chars
-  return msg.slice(0, 500);
+  // Keep under 600 chars (expanded for AI verdict)
+  return msg.slice(0, 600);
 }
