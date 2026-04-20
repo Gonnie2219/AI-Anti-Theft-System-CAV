@@ -26,35 +26,62 @@ export default {
 };
 
 async function handleCron(env) {
-  const alerts = await pollNtfy(env);
-  if (alerts.length === 0) return;
+  const messages = await pollNtfy(env);
+  if (messages.length === 0) return;
 
-  console.log(`Found ${alerts.length} alert(s) to forward`);
+  // Separate into alerts and photos
+  const alerts = messages.filter((m) => m.title.startsWith("Anti-Theft ALERT"));
+  const photos = messages.filter((m) => m.title === "Photo Evidence");
+
+  console.log(`Found ${alerts.length} alert(s), ${photos.length} photo(s)`);
 
   for (const alert of alerts) {
-    // Deduplication: skip if already sent
     const dedupKey = `msg:${alert.id}`;
-    const existing = await env.ANTITHEFT_STATE.get(dedupKey);
-    if (existing) {
+    if (await env.ANTITHEFT_STATE.get(dedupKey)) {
       console.log(`Skipping duplicate: ${alert.id}`);
       continue;
     }
 
+    // Find matching photo within 30s after the alert
+    const matchedPhoto = photos.find(
+      (p) => p.time >= alert.time && p.time - alert.time <= 30
+    );
+
+    const mediaUrl =
+      matchedPhoto && matchedPhoto.attachment && matchedPhoto.attachment.url
+        ? matchedPhoto.attachment.url
+        : null;
+
     const message = formatWhatsAppMessage(alert);
-    const success = await sendWhatsApp(env, message);
+    const success = await sendWhatsApp(env, message, mediaUrl);
 
     if (!success) {
       console.error(`Failed to send alert ${alert.id}, stopping batch`);
-      return; // Don't advance cursor — retry next cron
+      return;
     }
 
-    // Mark as sent with 24h TTL
     await env.ANTITHEFT_STATE.put(dedupKey, "1", { expirationTtl: 86400 });
-    console.log(`Forwarded alert ${alert.id}`);
+    if (matchedPhoto) {
+      await env.ANTITHEFT_STATE.put(`msg:${matchedPhoto.id}`, "1", {
+        expirationTtl: 86400,
+      });
+      console.log(`Forwarded alert ${alert.id} with photo ${matchedPhoto.id}`);
+    } else {
+      console.log(`Forwarded alert ${alert.id} (no photo matched)`);
+    }
   }
 
-  // All alerts sent successfully — advance cursor to latest message time
-  const latestTime = Math.max(...alerts.map((a) => a.time));
+  // Mark orphan photos as consumed so they don't pile up
+  for (const photo of photos) {
+    const dedupKey = `msg:${photo.id}`;
+    if (!(await env.ANTITHEFT_STATE.get(dedupKey))) {
+      await env.ANTITHEFT_STATE.put(dedupKey, "1", { expirationTtl: 86400 });
+      console.log(`Consumed orphan photo ${photo.id}`);
+    }
+  }
+
+  // Advance cursor past all processed messages
+  const latestTime = Math.max(...messages.map((m) => m.time));
   await env.ANTITHEFT_STATE.put("last_poll_timestamp", String(latestTime));
 }
 
@@ -87,24 +114,30 @@ async function pollNtfy(env) {
     })
     .filter(Boolean);
 
-  // Filter: only message events with anti-theft alert title
+  // Filter: alerts and photo evidence messages
   return messages.filter(
     (msg) =>
       msg.event === "message" &&
       msg.title &&
-      msg.title.startsWith("Anti-Theft ALERT")
+      (msg.title.startsWith("Anti-Theft ALERT") ||
+        msg.title === "Photo Evidence")
   );
 }
 
-async function sendWhatsApp(env, message) {
+async function sendWhatsApp(env, message, mediaUrl) {
   const url = `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`;
   const auth = btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`);
 
-  const body = new URLSearchParams({
+  const params = {
     To: env.TWILIO_TO,
     From: env.TWILIO_FROM,
     Body: message,
-  });
+  };
+  if (mediaUrl) {
+    params.MediaUrl = mediaUrl;
+    console.log(`Attaching photo: ${mediaUrl}`);
+  }
+  const body = new URLSearchParams(params);
 
   const resp = await fetch(url, {
     method: "POST",
