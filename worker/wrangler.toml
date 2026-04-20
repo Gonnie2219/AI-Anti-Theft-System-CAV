@@ -1,0 +1,10 @@
+name = "antitheft-whatsapp-bridge"
+main = "worker.js"
+compatibility_date = "2024-12-01"
+
+[triggers]
+crons = ["* * * * *"]
+
+[[kv_namespaces]]
+binding = "ANTITHEFT_STATE"
+id = "5ea254ff6df44732bc078692ab05b1b5"

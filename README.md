@@ -215,6 +215,15 @@ The dashboard connects to the ntfy.sh alert topic via **Server-Sent Events (SSE)
 2. `cd webapp`
 3. `vercel --prod`
 
+### WhatsApp Alerts (Cloudflare Worker)
+
+A Cloudflare Worker polls ntfy.sh every minute and forwards anti-theft alerts to WhatsApp via Twilio:
+
+- **Why:** US A2P 10DLC regulations prevent unregistered SMS delivery on T-Mobile. WhatsApp via Twilio Sandbox bypasses this for urgent alerts.
+- **What gets forwarded:** Only `Anti-Theft ALERT` messages (vibration/door triggers) — heartbeats, status changes, and photos are ignored.
+- **Sandbox caveat:** Twilio WhatsApp Sandbox sessions expire every 72 hours. Rejoin by sending `join <your-keyword>` to +1 415 523 8886 on WhatsApp.
+- **Deploy:** `cd worker && wrangler deploy` (see `worker/README.md` for full setup)
+
 ### Hologram SIM
 
 The LILYGO board uses a [Hologram](https://hologram.io) IoT SIM card:
@@ -256,6 +265,11 @@ AI-Anti-Theft-System-CAV/
 │   │   └── index.html                  # Web dashboard (single file, no build tools)
 │   ├── package.json                    # Project metadata + Anthropic SDK dependency
 │   └── vercel.json                     # Vercel deployment config
+├── worker/
+│   ├── worker.js                       # Cloudflare Worker: ntfy → WhatsApp bridge
+│   ├── wrangler.toml                   # Wrangler deployment config
+│   ├── package.json                    # Minimal metadata (no dependencies)
+│   └── .gitignore
 ├── docs/
 │   └── ARCHITECTURE.md                 # Detailed system architecture
 ├── .gitignore
