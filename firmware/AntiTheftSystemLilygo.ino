@@ -501,82 +501,24 @@ bool sendWithImage(String reason) {
   body += "\n\nPhoto captured - see next notification.";
   body += getBatteryString();
 
-  String req = "POST /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
-  req += "Host: ntfy.sh\r\n";
-  req += "Title: " + String(isRequested ? "Requested Photo" : "Anti-Theft ALERT") + "\r\n";
-  req += "Priority: " + String(isRequested ? "default" : "urgent") + "\r\n";
-  req += "Tags: " + String(isRequested ? "camera" : "rotating_light") + "\r\n";
-  req += "Markdown: yes\r\n";
-  if (gpsMapsLink.length() > 0) req += "Click: " + gpsMapsLink + "\r\n";
-  req += "Content-Length: " + String(body.length()) + "\r\n";
-  req += "Connection: close\r\n\r\n" + body;
+  String hdrs = "Title: " + String(isRequested ? "Requested Photo" : "Anti-Theft ALERT");
+  hdrs += "\r\nPriority: " + String(isRequested ? "default" : "urgent");
+  hdrs += "\r\nTags: " + String(isRequested ? "camera" : "rotating_light");
+  hdrs += "\r\nMarkdown: yes";
+  if (gpsMapsLink.length() > 0) hdrs += "\r\nClick: " + gpsMapsLink;
 
-  // Connect and send text notification
-  if (!tcpConnect()) return false;
-  if (!cipSend(req)) { sendATWait("AT+CIPCLOSE=0",5000); return false; }
-  waitForResponse();
-  delay(1000);
-  sendATWait("AT+CIPCLOSE=0", 5000);
-  delay(500);
-  while (SerialAT.available()) SerialAT.read();  // Drain remaining AT responses
+  if (!sendHttpText(String(NTFY_TOPIC), hdrs, body)) return false;
+
   SerialMon.println("  Battery recovery delay");
   delay(5000);  // Wait for 18650 battery voltage recovery before image upload
 
-  // === NOTIFICATION 2: Image-only with minimal headers ===
+  // === NOTIFICATION 2: Image PUT ===
   SerialMon.println("  [2/2] Photo upload");
 
-  // Keep headers minimal - let ntfy auto-detect the image
-  String hdr = "PUT /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
-  hdr += "Host: ntfy.sh\r\n";
-  hdr += "Title: " + String(isRequested ? "Requested Photo" : "Photo Evidence") + "\r\n";
-  hdr += "Filename: alert.jpg\r\n";
-  hdr += "Content-Length: " + String(imgSize) + "\r\n";
-  hdr += "Connection: close\r\n\r\n";
+  String imgHdrs = "Title: " + String(isRequested ? "Requested Photo" : "Photo Evidence");
+  imgHdrs += "\r\nFilename: alert.jpg";
 
-  // Connect
-  if (!tcpConnect()) return false;
-
-  // Send headers
-  if (!cipSend(hdr)) { sendATWait("AT+CIPCLOSE=0",5000); return false; }
-
-  // Send image in 1KB chunks
-  SerialMon.println("  Uploading " + String(imgSize) + " bytes");
-  size_t sent = 0;
-  while (sent < imgSize) {
-    size_t chunk = imgSize - sent;
-    if (chunk > 1024) chunk = 1024;
-
-    SerialAT.println("AT+CIPSEND=0," + String(chunk));
-    unsigned long s = millis(); String r = "";
-    while (millis()-s < 5000) {
-      while (SerialAT.available()) r += (char)SerialAT.read();
-      if (r.indexOf(">") >= 0) break;
-      if (r.indexOf("ERROR") >= 0) { sendATWait("AT+CIPCLOSE=0",5000); return false; }
-      delay(10);
-    }
-    if (r.indexOf(">") < 0) { sendATWait("AT+CIPCLOSE=0",5000); return false; }
-
-    SerialAT.write(imgBuffer + sent, chunk);
-    sent += chunk;
-
-    s = millis(); r = "";
-    while (millis()-s < 5000) {
-      while (SerialAT.available()) r += (char)SerialAT.read();
-      if (r.indexOf("+CIPSEND:") >= 0 || r.indexOf("ERROR") >= 0) break;
-      delay(10);
-    }
-
-    if (sent % 4096 < 1024 || sent >= imgSize)
-      SerialMon.println("  " + String(sent) + "/" + String(imgSize));
-  }
-
-  // Wait for response
-  bool ok = waitForResponse();
-  if (!ok && sent >= imgSize) ok = true;
-  delay(500);
-  sendATWait("AT+CIPCLOSE=0", 5000);
-
-  return ok;
+  return sendHttpBinary(String(NTFY_TOPIC), imgHdrs, imgBuffer, imgSize);
 }
 
 // Helper: open TCP connection to ntfy.sh
