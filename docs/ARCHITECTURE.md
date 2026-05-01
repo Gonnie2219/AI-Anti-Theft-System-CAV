@@ -31,8 +31,8 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
   - UART0 (Serial) = USB debug
   - UART1 (Serial1) = SIM7600 modem (TX=27 RX=26)
   - UART2 (Serial2, RX=21 TX=19) = Main ESP32
-- **Network:** Speedtalk SIM, APN "Wholesale", connects to ntfy.sh via raw TCP (HTTP over AT+CIPOPEN/CIPSEND)
-- **Network recovery:** `ensureNetwork()` checks AT+CREG? before each TCP connection and re-registers if cellular dropped
+- **Network:** Speedtalk SIM, APN "Wholesale", connects to ntfy.sh via SIM7600 built-in HTTP stack (AT+HTTPINIT/HTTPPARA/HTTPDATA/HTTPACTION)
+- **Network recovery:** `ensureNetwork()` checks AT+CREG? before each HTTP request and re-registers if cellular dropped
 - **Command polling:** Every 5s, polls `antitheft-gonnie-2219-cmd` topic for commands (ARM, DISARM, GPS, PHOTO). Sends `REMOTE_ARM`/`REMOTE_DISARM` to Main ESP32 or handles GPS/photo requests directly.
 - **SMS channel:** Sends outbound SMS alerts on alarm events (rate-limited to 10/hr). Receives inbound SMS commands (ARM, DISARM, STATUS, PHOTO, GPS, HELP) from whitelisted owner phone number. URC-based notification (`+CMTI:`) with 30-second safety-net poll (`AT+CMGL`).
 - **Notification types:**
@@ -42,7 +42,7 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
   - STATUS: Arm/disarm notifications (low priority)
   - Command ack: Title: "Command Acknowledged", Priority: low, Tags: white_check_mark
   - GPS response: Title: "GPS Location", Priority: low, Tags: round_pushpin
-  - Heartbeat: Every 6 hours
+  - Heartbeat: Every 2 minutes
   - SMS alert: Outbound SMS on alarm events (not photo requests) — includes reason, timestamp, GPS link, ntfy photo link
   - SMS reply: Response to inbound SMS commands (ARM/DISARM confirmation, status, photo link, GPS location)
 - **GPS:** Polled every 30s via AT+CGPSINFO, included in notifications
@@ -118,7 +118,7 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
 | CAM serial RX buffer | 2048 bytes | ESP32Main |
 | Image receive timeout | 30s (outer), 15s (inner) | LILYGO |
 | LILYGO response timeout | 90s | ESP32Main |
-| Heartbeat interval | 6 hours | LILYGO |
+| Heartbeat interval | 2 minutes | LILYGO |
 | Command poll interval | 5000ms | LILYGO |
 | ntfy alert topic | antitheft-gonnie-2219 | LILYGO |
 | ntfy command topic | antitheft-gonnie-2219-cmd | LILYGO + Web Dashboard |

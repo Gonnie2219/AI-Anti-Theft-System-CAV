@@ -189,7 +189,7 @@ The system sends push notifications via [ntfy.sh](https://ntfy.sh):
    - **STATUS** (low priority) — Arm/disarm state changes
    - **Command Acknowledged** (low priority) — Confirmation of web dashboard commands
    - **GPS Location** (low priority) — On-demand GPS response with map link
-   - **Heartbeat** (min priority) — System health check every 6 hours
+   - **Heartbeat** (min priority) — System health check every 2 minutes
 4. Command topic: `antitheft-gonnie-2219-cmd` — used by the web dashboard to send commands (ARM, DISARM, GPS, PHOTO) to the LILYGO, which polls every 5 seconds
 
 ### Web Dashboard
@@ -244,7 +244,6 @@ The LILYGO board uses a [Speedtalk](https://www.speedtalkmobile.com) SIM card:
 
 | Issue | Details | Workaround |
 |-------|---------|------------|
-| **No DNS on SIM7600** | The SIM7600 modem's `AT+CIPOPEN` command does not reliably resolve hostnames. | `NTFY_IP` is hardcoded to `159.203.148.75` (ntfy.sh). If ntfy.sh changes IP, update this constant. |
 | **ntfy email delivery requires auth** | Sending notifications via ntfy.sh email forwarding requires an authenticated ntfy account. | Use phone push notifications (no auth required) instead of email forwarding. |
 | **50KB image buffer limit** | Images larger than 50KB are rejected. VGA quality 10 JPEG typically produces 15-40KB images. | If images are consistently too large, reduce `FRAMESIZE_VGA` to `FRAMESIZE_CIF` or increase `jpeg_quality` number (lower quality). |
 | **Single alarm at a time** | The `alarmInProgress` flag prevents concurrent alarms. A second sensor trigger during an active alarm is ignored. | By design — prevents resource contention and duplicate notifications. The 5-second debounce also helps. |
@@ -256,7 +255,7 @@ The LILYGO board uses a [Speedtalk](https://www.speedtalkmobile.com) SIM card:
 - **OTA firmware updates** — Enable over-the-air updates via cellular connection
 - ~~**Battery monitoring**~~ — ✅ Implemented: AT+CBC voltage-based battery estimation with color-coded dashboard widget
 - **Multi-zone sensors** — Add additional vibration sensors or break-wire sensors for window/trunk coverage
-- **Encrypted communication** — Add HTTPS/TLS support when using a modem with TLS capability
+- **Encrypted communication** — HTTPS is now possible via `AT+HTTPPARA="URL","https://..."` (SIM7600 HTTP stack supports TLS natively); needs testing with ntfy.sh
 
 ## Project Structure
 

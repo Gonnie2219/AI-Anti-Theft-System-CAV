@@ -31,9 +31,9 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
   - UART0 (Serial) = USB debug
   - UART1 (Serial1) = SIM7600 modem (TX=27 RX=26)
   - UART2 (Serial2, RX=21 TX=19) = Main ESP32
-- **Network:** Hologram SIM, APN "hologram", connects to ntfy.sh via raw TCP (HTTP over AT+CIPOPEN/CIPSEND)
-- **Network recovery:** `ensureNetwork()` checks AT+CREG? before each TCP connection and re-registers if cellular dropped
-- **Notification transport:** ntfy.sh via raw TCP HTTP to `159.203.148.75:80` (port 80 is used because the SIM7600 firmware `LE20B05` lacks SNI support, which prevents HTTPS to Cloudflare-fronted hosts).
+- **Network:** Speedtalk SIM, APN "Wholesale", connects to ntfy.sh via SIM7600 built-in HTTP stack (AT+HTTPINIT/HTTPPARA/HTTPDATA/HTTPACTION)
+- **Network recovery:** `ensureNetwork()` checks AT+CREG? before each HTTP request and re-registers if cellular dropped
+- **Notification transport:** ntfy.sh via SIM7600 HTTP service, which handles DNS resolution and supports IPv6 (required for Speedtalk's IPv6-only PDP context).
 - **Command polling:** Every 5s, polls `antitheft-gonnie-2219-cmd` topic for commands (ARM, DISARM, GPS, PHOTO). Sends `REMOTE_ARM`/`REMOTE_DISARM` to Main ESP32 or handles GPS/photo requests directly.
 - **Notification types:**
   - ALERT with image: ntfy text POST → ntfy image PUT (Title: "Anti-Theft ALERT", Priority: urgent, Tags: rotating_light)
@@ -42,7 +42,7 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
   - STATUS (arm/disarm): ntfy POST
   - Command ack: ntfy POST (Title: "Command Acknowledged", Priority: low, Tags: white_check_mark)
   - GPS response: ntfy POST (Title: "GPS Location", Priority: low, Tags: round_pushpin)
-  - Heartbeat: ntfy POST (every 6 hours)
+  - Heartbeat: ntfy POST (every 2 minutes)
 - **GPS:** Polled every 30s via AT+CGPSINFO, included in ntfy bodies
 
 ## Inter-Board Protocol (UART, 115200 baud)
@@ -111,7 +111,7 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
 | CAM serial RX buffer | 2048 bytes | ESP32Main |
 | Image receive timeout | 30s (outer), 15s (inner) | LILYGO |
 | LILYGO response timeout | 90s | ESP32Main |
-| Heartbeat interval | 6 hours | LILYGO |
+| Heartbeat interval | 2 minutes | LILYGO |
 | Command poll interval | 5000ms | LILYGO |
 | ntfy alert topic | antitheft-gonnie-2219 | LILYGO |
 | ntfy command topic | antitheft-gonnie-2219-cmd | LILYGO + Web Dashboard |

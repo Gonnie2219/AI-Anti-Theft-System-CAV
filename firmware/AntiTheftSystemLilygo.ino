@@ -29,7 +29,6 @@
 const char APN[]        = "Wholesale";
 const char NTFY_TOPIC[] = "antitheft-gonnie-2219";
 const char CMD_TOPIC[]  = "antitheft-gonnie-2219-cmd";
-const char NTFY_IP[]    = "159.203.148.75";
 
 #define OWNER_PHONE   "+16093589220"
 #define SYSTEM_PHONE  "+13132081968"   // Speedtalk SIM (informational)
@@ -519,72 +518,6 @@ bool sendWithImage(String reason) {
   imgHdrs += "\r\nFilename: alert.jpg";
 
   return sendHttpBinary(String(NTFY_TOPIC), imgHdrs, imgBuffer, imgSize);
-}
-
-// Helper: open TCP connection to ntfy.sh
-bool tcpConnect() {
-  while (SerialAT.available()) SerialAT.read();  // Drain stale AT buffer
-  ensureNetwork();
-  if (!networkReady) return false;
-  SerialMon.println("  Connecting to ntfy.sh");
-  SerialAT.println("AT+CIPOPEN=0,\"TCP\",\"" + String(NTFY_IP) + "\",80");
-  unsigned long s = millis(); String r = "";
-  while (millis()-s < 15000) {
-    while (SerialAT.available()) r += (char)SerialAT.read();
-    if (r.indexOf("+CIPOPEN: 0,0") >= 0) return true;
-    if (r.indexOf("+CIPOPEN: 0,") >= 0 && r.indexOf("+CIPOPEN: 0,0") < 0) break;
-    delay(10);
-  }
-  SerialMon.println("  Connect failed");
-  return false;
-}
-
-// Helper: wait for HTTP response
-bool waitForResponse() {
-  unsigned long s = millis(); String r = "";
-  while (millis()-s < 20000) {
-    while (SerialAT.available()) r += (char)SerialAT.read();
-    if (r.indexOf("200 OK") >= 0) {
-      SerialMon.println("  HTTP OK");
-      return true;
-    }
-    if (r.indexOf("HTTP/") >= 0 && r.indexOf(" 200") >= 0) {
-      SerialMon.println("  HTTP OK");
-      return true;
-    }
-    if (r.indexOf("+IPCLOSE") >= 0 || r.indexOf("+CIPCLOSE") >= 0) break;
-    delay(100);
-  }
-  // Drain remaining response data for 2 more seconds
-  unsigned long drain = millis();
-  while (millis() - drain < 2000) {
-    while (SerialAT.available()) r += (char)SerialAT.read();
-    delay(50);
-  }
-  SerialMon.println("  HTTP failed or timed out");
-  return false;
-}
-
-// Send string data via CIPSEND
-bool cipSend(String data) {
-  SerialAT.println("AT+CIPSEND=0," + String(data.length()));
-  unsigned long s = millis(); String r = "";
-  while (millis()-s < 5000) {
-    while (SerialAT.available()) r += (char)SerialAT.read();
-    if (r.indexOf(">") >= 0) break;
-    if (r.indexOf("ERROR") >= 0) return false;
-    delay(10);
-  }
-  if (r.indexOf(">") < 0) return false;
-  SerialAT.print(data);
-  s = millis(); r = "";
-  while (millis()-s < 5000) {
-    while (SerialAT.available()) r += (char)SerialAT.read();
-    if (r.indexOf("+CIPSEND:") >= 0) return true;
-    if (r.indexOf("ERROR") >= 0) return false;
-    delay(10);
-  }
-  return true;
 }
 
 // ── Text-Only Notification (fallback) ────────────────────────
