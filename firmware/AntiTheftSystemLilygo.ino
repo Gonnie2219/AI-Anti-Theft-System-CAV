@@ -1,6 +1,7 @@
 /*
  * ANTI-THEFT SYSTEM — LILYGO T-SIM7600G-H
  * Cellular gateway: receives alert + photo from Main ESP32, uploads to ntfy.sh.
+ * SMS channel: sends alert SMS, receives and processes inbound SMS commands.
  * Board: ESP32 Dev Module
  *
  * Serial  (UART0) = USB debug
@@ -25,10 +26,18 @@
 #define SerialMon   Serial
 #define SerialAT    Serial1
 
-const char APN[]        = "hologram";
+const char APN[]        = "Wholesale";
 const char NTFY_TOPIC[] = "antitheft-gonnie-2219";
 const char CMD_TOPIC[]  = "antitheft-gonnie-2219-cmd";
 const char NTFY_IP[]    = "159.203.148.75";
+
+#define OWNER_PHONE   "+16093589220"
+#define SYSTEM_PHONE  "+13132081968"   // Speedtalk SIM (informational)
+
+// SMS rate limiting
+#define SMS_MAX_PER_HOUR 10
+int smsCount = 0;
+unsigned long smsWindowStart = 0;
 
 #define IMG_BUF_SIZE 51200
 uint8_t* imgBuffer = NULL;
@@ -44,6 +53,9 @@ String batteryPercent = "";
 String batteryVoltage = "";
 #define HEARTBEAT_MS 120000  // 2 minutes
 #define POLL_INTERVAL_MS 5000
+unsigned long lastSMSCheck = 0;
+#define SMS_CHECK_MS 30000  // Safety-net poll every 30s
+bool smsPhotoRequested = false;
 
 // ── AT Helpers ───────────────────────────────────────────────
 String sendAT(String cmd, String exp, unsigned long t) {
@@ -176,6 +188,9 @@ void setup() {
   SerialMon.println("Modem online");
 
   sendAT("ATE0","OK",1000);
+  sendAT("AT+CMGF=1", "OK", 2000);   // Text mode SMS
+  sendAT("AT+CSCS=\"GSM\"", "OK", 2000); // GSM 7-bit charset
+  sendAT("AT+CNMI=2,1,0,0,0", "OK", 2000);  // URC on new SMS
   sendAT("AT+CGDCONT=1,\"IP\",\"" + String(APN) + "\"","OK",3000);
   SerialMon.print("  Registering");
   for (int i = 0; i < 15; i++) {
@@ -224,6 +239,21 @@ void setup() {
 
 // ── Main Loop ────────────────────────────────────────────────
 void loop() {
+  checkSMSNotifications();
+
+  if (millis() - lastSMSCheck > SMS_CHECK_MS) {
+    checkUnreadSMS();
+    lastSMSCheck = millis();
+  }
+
+  // Debug: type "TESTSMS" in USB serial
+  if (SerialMon.available()) {
+    String dbg = SerialMon.readStringUntil('\n'); dbg.trim();
+    if (dbg == "TESTSMS") {
+      sendSMS(OWNER_PHONE, "Test SMS from anti-theft system");
+    }
+  }
+
   if (Serial2.available()) {
     String cmd = Serial2.readStringUntil('\n'); cmd.trim();
 
@@ -255,6 +285,20 @@ void loop() {
 
       Serial2.println(success ? "LILYGO_OK: Notification sent" : "LILYGO_ERROR");
       SerialMon.println(success ? "Notification sent" : "Notification failed");
+
+      // Send SMS alert (in addition to ntfy)
+      sendAlertSMS(reason);
+
+      // If this photo was requested via SMS, send reply with link
+      if (smsPhotoRequested && reason == "Photo Requested") {
+        smsPhotoRequested = false;
+        if (success) {
+          sendSMS(OWNER_PHONE, "Photo uploaded:\nhttps://ntfy.sh/" + String(NTFY_TOPIC));
+        } else {
+          sendSMS(OWNER_PHONE, "Photo upload failed");
+        }
+      }
+
       digitalWrite(LED_PIN, LOW);
 
     } else if (cmd.startsWith("STATUS:")) {
@@ -680,4 +724,234 @@ void updateGPS() {
     }
   }
   lastGPSUpdate = millis();
+}
+
+// ── SMS Send ─────────────────────────────────────────────────
+bool sendSMS(String to, String body) {
+  // Rate limit check
+  if (millis() - smsWindowStart > 3600000UL) {
+    smsCount = 0;
+    smsWindowStart = millis();
+  }
+  if (smsCount >= SMS_MAX_PER_HOUR) {
+    SerialMon.println("SMS rate limit reached (" + String(SMS_MAX_PER_HOUR) + "/hr)");
+    return false;
+  }
+
+  SerialMon.println("Sending SMS to " + to);
+
+  // Ensure text mode
+  sendAT("AT+CMGF=1", "OK", 2000);
+
+  // Send AT+CMGS="<number>"
+  SerialAT.println("AT+CMGS=\"" + to + "\"");
+  unsigned long s = millis();
+  String r = "";
+  while (millis() - s < 5000) {
+    while (SerialAT.available()) r += (char)SerialAT.read();
+    if (r.indexOf(">") >= 0) break;
+    if (r.indexOf("ERROR") >= 0) {
+      SerialMon.println("SMS CMGS error: " + r);
+      return false;
+    }
+    delay(10);
+  }
+  if (r.indexOf(">") < 0) {
+    SerialMon.println("SMS no prompt");
+    return false;
+  }
+
+  // Send body + Ctrl+Z
+  SerialAT.print(body);
+  delay(100);
+  SerialAT.write(26);  // Ctrl+Z
+
+  // Wait for +CMGS: (success) or ERROR
+  s = millis();
+  r = "";
+  while (millis() - s < 30000) {
+    while (SerialAT.available()) r += (char)SerialAT.read();
+    if (r.indexOf("+CMGS:") >= 0) {
+      smsCount++;
+      SerialMon.println("SMS sent OK (" + String(smsCount) + "/" + String(SMS_MAX_PER_HOUR) + " this hour)");
+      return true;
+    }
+    if (r.indexOf("ERROR") >= 0 || r.indexOf("+CMS ERROR:") >= 0) {
+      SerialMon.println("SMS send failed: " + r);
+      return false;
+    }
+    delay(100);
+  }
+  SerialMon.println("SMS timeout");
+  return false;
+}
+
+// ── SMS Alert ────────────────────────────────────────────────
+void sendAlertSMS(String reason) {
+  if (reason == "Photo Requested") return;  // Handled separately via smsPhotoRequested
+  String timestamp = getModemTime();
+  String body = "ALERT: " + reason;
+  if (timestamp.length() > 0) body += "\nTime: " + timestamp;
+  if (gpsMapsLink.length() > 0) body += "\n" + gpsMapsLink;
+  body += "\nPhoto: https://ntfy.sh/" + String(NTFY_TOPIC);
+  sendSMS(OWNER_PHONE, body);
+}
+
+// ── SMS Notifications (URC) ─────────────────────────────────
+void checkSMSNotifications() {
+  if (!SerialAT.available()) return;
+
+  String buf = "";
+  unsigned long start = millis();
+  while (SerialAT.available() && millis() - start < 100) {
+    buf += (char)SerialAT.read();
+  }
+
+  // Look for +CMTI: "SM",<index>
+  int pos = 0;
+  while (true) {
+    int idx = buf.indexOf("+CMTI:", pos);
+    if (idx < 0) break;
+    int comma = buf.indexOf(',', idx);
+    if (comma >= 0) {
+      String smsIdxStr = buf.substring(comma + 1);
+      smsIdxStr.trim();
+      int smsIndex = smsIdxStr.toInt();
+      SerialMon.println("SMS notification: index " + String(smsIndex));
+      readAndProcessSMS(smsIndex);
+    }
+    pos = (comma >= 0) ? comma + 1 : idx + 6;
+  }
+}
+
+// ── SMS Safety-Net Poll ─────────────────────────────────────
+void checkUnreadSMS() {
+  String resp = sendAT("AT+CMGL=\"REC UNREAD\"", "OK", 5000);
+  int pos = 0;
+  while (true) {
+    int idx = resp.indexOf("+CMGL:", pos);
+    if (idx < 0) break;
+    int comma = resp.indexOf(',', idx);
+    if (comma >= 0) {
+      String smsIdxStr = resp.substring(idx + 7, comma);
+      smsIdxStr.trim();
+      int smsIndex = smsIdxStr.toInt();
+      readAndProcessSMS(smsIndex);
+    }
+    pos = (comma >= 0) ? comma + 1 : idx + 6;
+  }
+}
+
+// ── SMS Read + Parse ────────────────────────────────────────
+void readAndProcessSMS(int index) {
+  String resp = sendAT("AT+CMGR=" + String(index), "OK", 5000);
+
+  int cmgrIdx = resp.indexOf("+CMGR:");
+  if (cmgrIdx < 0) { sendATWait("AT+CMGD=" + String(index), 3000); return; }
+
+  // Extract sender: second quoted field (after status)
+  int q1 = resp.indexOf('"', cmgrIdx);
+  int q2 = resp.indexOf('"', q1 + 1);  // end of status
+  int q3 = resp.indexOf('"', q2 + 1);  // start of sender
+  int q4 = resp.indexOf('"', q3 + 1);  // end of sender
+  if (q4 < 0) { sendATWait("AT+CMGD=" + String(index), 3000); return; }
+  String sender = resp.substring(q3 + 1, q4);
+
+  // Extract body: text between header end and OK
+  int headerEnd = resp.indexOf('\n', q4);
+  int okIdx = resp.lastIndexOf("\r\nOK");
+  if (okIdx < 0) okIdx = resp.lastIndexOf("OK");
+  String body = "";
+  if (headerEnd >= 0 && okIdx > headerEnd) {
+    body = resp.substring(headerEnd + 1, okIdx);
+    body.trim();
+  }
+
+  // Delete message from SIM storage
+  sendATWait("AT+CMGD=" + String(index), 3000);
+
+  SerialMon.println("SMS from: " + sender);
+  SerialMon.println("SMS body: " + body);
+
+  // Whitelist check
+  sender.trim();
+  if (!isAuthorizedSender(sender)) {
+    SerialMon.println("SMS rejected: unauthorized sender");
+    return;
+  }
+
+  body.toUpperCase();
+  handleSMSCommand(body);
+}
+
+bool isAuthorizedSender(String number) {
+  number.trim();
+  String owner = OWNER_PHONE;
+  // Compare last 10 digits to handle +1 vs 1 vs raw
+  if (number.length() >= 10 && owner.length() >= 10) {
+    return number.substring(number.length() - 10) == owner.substring(owner.length() - 10);
+  }
+  return number == owner;
+}
+
+// ── SMS Command Handler ─────────────────────────────────────
+void handleSMSCommand(String cmd) {
+  cmd.trim();
+  SerialMon.println("SMS CMD: " + cmd);
+
+  if (cmd == "ARM") {
+    Serial2.println("SMS_CMD:ARM");
+    String reply = waitForMainReply(5000);
+    if (reply.length() > 0) {
+      sendSMS(OWNER_PHONE, reply);
+    } else {
+      sendSMS(OWNER_PHONE, "ARM command sent (no confirmation from Main)");
+    }
+  } else if (cmd == "DISARM") {
+    Serial2.println("SMS_CMD:DISARM");
+    String reply = waitForMainReply(5000);
+    if (reply.length() > 0) {
+      sendSMS(OWNER_PHONE, reply);
+    } else {
+      sendSMS(OWNER_PHONE, "DISARM command sent (no confirmation from Main)");
+    }
+  } else if (cmd == "STATUS") {
+    Serial2.println("SMS_CMD:STATUS");
+    String reply = waitForMainReply(5000);
+    getBatteryLevel();
+    updateGPS();
+    String smsBody = (reply.length() > 0) ? reply : "Status unknown";
+    smsBody += getBatteryString();
+    if (gpsMapsLink.length() > 0) smsBody += "\n" + gpsMapsLink;
+    sendSMS(OWNER_PHONE, smsBody);
+  } else if (cmd == "PHOTO") {
+    smsPhotoRequested = true;
+    Serial2.println("SMS_CMD:PHOTO");
+    sendSMS(OWNER_PHONE, "Photo requested. Will reply with link when ready.");
+  } else if (cmd == "GPS") {
+    updateGPS();
+    if (gpsMapsLink.length() > 0) {
+      sendSMS(OWNER_PHONE, "Location:\n" + gpsMapsLink);
+    } else {
+      sendSMS(OWNER_PHONE, "GPS fix not available");
+    }
+  } else if (cmd == "HELP") {
+    sendSMS(OWNER_PHONE, "Commands: ARM, DISARM, STATUS, PHOTO, GPS, HELP");
+  } else {
+    SerialMon.println("Unknown SMS command: " + cmd);
+  }
+}
+
+String waitForMainReply(unsigned long timeout) {
+  unsigned long start = millis();
+  while (millis() - start < timeout) {
+    if (Serial2.available()) {
+      String line = Serial2.readStringUntil('\n');
+      line.trim();
+      if (line.startsWith("SMS_REPLY:")) return line.substring(10);
+      if (line.length() > 0) SerialMon.println("Main (while waiting): " + line);
+    }
+    delay(10);
+  }
+  return "";
 }

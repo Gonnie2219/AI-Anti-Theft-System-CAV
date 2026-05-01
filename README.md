@@ -30,7 +30,8 @@ The system uses three interconnected ESP32 boards communicating over UART at 115
                                      │ - Cellular modem │
                                      │ - GPS tracking   │
                                      │ - ntfy.sh alerts │
-                                     │ - Hologram SIM   │
+                                     │ - SMS alerts     │
+                                     │ - Speedtalk SIM  │
                                      └──────────────────┘
 ```
 
@@ -48,7 +49,7 @@ The system uses three interconnected ESP32 boards communicating over UART at 115
 | RF Remote | 433MHz (RCSwitch) | Arm/disarm |
 | Vibration Sensor | SW-420 | Tamper detection |
 | Reed Switch | Magnetic | Door open detection |
-| SIM Card | Hologram IoT SIM | Cellular data |
+| SIM Card | Speedtalk Mobile SIM | Cellular data + SMS |
 | LEDs | Green + Red | Armed/disarmed status |
 
 ## Pin Mapping
@@ -111,8 +112,9 @@ All UART communication runs at **115200 baud, 8N1**.
 
 | Message | Meaning |
 |---------|---------|
-| `STATUS:ARMED` | System armed via RF remote |
-| `STATUS:DISARMED` | System disarmed via RF remote |
+| `STATUS:ARMED` | System armed via RF remote or SMS |
+| `STATUS:DISARMED` | System disarmed via RF remote or SMS |
+| `SMS_REPLY:<text>` | Response text to send back via SMS |
 | `ALERT:<reason>` | Alarm triggered (e.g., "Vibration", "Door Opened") |
 | `IMG:<size>` + raw bytes + `IMG_END` | Photo data transfer |
 | `NOIMG` | No photo available |
@@ -127,6 +129,10 @@ All UART communication runs at **115200 baud, 8N1**.
 | `REMOTE_ARM` | Remote arm command from web dashboard |
 | `REMOTE_DISARM` | Remote disarm command from web dashboard |
 | `REQUEST_PHOTO` | Photo request from web dashboard |
+| `SMS_CMD:ARM` | Arm command from inbound SMS |
+| `SMS_CMD:DISARM` | Disarm command from inbound SMS |
+| `SMS_CMD:STATUS` | Status request from inbound SMS |
+| `SMS_CMD:PHOTO` | Photo request from inbound SMS |
 
 ### Main ESP32 → ESP32-CAM
 
@@ -166,7 +172,7 @@ All UART communication runs at **115200 baud, 8N1**.
 ### Flash Order
 
 1. **ESP32-CAM** — Flash first, insert SD card, verify `CAM_READY` on serial monitor
-2. **LILYGO** — Flash second, insert Hologram SIM, verify `Ready! Waiting for ALERT...` on serial monitor
+2. **LILYGO** — Flash second, insert Speedtalk SIM, verify `Ready! Waiting for ALERT...` on serial monitor
 3. **Main ESP32** — Flash last, connect wiring to both boards, verify `Status: DISARMED` on serial monitor
 
 ## Notification Setup
@@ -224,13 +230,15 @@ A Cloudflare Worker polls ntfy.sh every minute and forwards anti-theft alerts to
 - **Sandbox caveat:** Twilio WhatsApp Sandbox sessions expire every 72 hours. Rejoin by sending `join <your-keyword>` to +1 415 523 8886 on WhatsApp.
 - **Deploy:** `cd worker && wrangler deploy` (see `worker/README.md` for full setup)
 
-### Hologram SIM
+### Speedtalk Mobile SIM
 
-The LILYGO board uses a [Hologram](https://hologram.io) IoT SIM card:
+The LILYGO board uses a [Speedtalk](https://www.speedtalkmobile.com) SIM card:
 
-- APN: `hologram`
+- APN: `Wholesale`
 - The SIM provides data connectivity for HTTP requests and GPS assistance
-- No SMS is used — all communication goes through ntfy.sh HTTP API
+- **SMS alerts:** Alarm events are sent as SMS to the owner's phone number
+- **SMS commands:** Text `ARM`, `DISARM`, `STATUS`, `PHOTO`, `GPS`, or `HELP` to the system's phone number to control it remotely
+- SMS is rate-limited to 10 messages per hour to prevent runaway costs
 
 ## Known Issues
 

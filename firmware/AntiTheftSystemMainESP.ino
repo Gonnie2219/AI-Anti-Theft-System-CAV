@@ -1,6 +1,7 @@
 /*
  * ANTI-THEFT SYSTEM — Main ESP32
  * Central coordinator: reads sensors, buffers photo from CAM, forwards to LILYGO.
+ * Handles SMS commands (ARM, DISARM, STATUS, PHOTO) forwarded from LILYGO.
  * Board: ESP32 Dev Module
  *
  * Core 1 (main loop): RF remote, sensors, LED control — always responsive.
@@ -156,6 +157,9 @@ void loop() {
           SerialLilyGO.println("STATUS:DISARMED");
         } else if (r == "REQUEST_PHOTO") {
           startAlarm("Photo Requested");
+        } else if (r.startsWith("SMS_CMD:")) {
+          String smsCmd = r.substring(8);
+          handleSMSCommand(smsCmd);
         }
       }
     }
@@ -322,4 +326,48 @@ bool receivePhotoFromCAM() {
     Serial.println("  Photo timeout (no header)");
   }
   return false;
+}
+
+// ── SMS Command Handler ──────────────────────────────────────
+void handleSMSCommand(String cmd) {
+  Serial.println("SMS command: " + cmd);
+
+  if (cmd == "ARM") {
+    if (!armed) {
+      armed = true;
+      digitalWrite(LED_GREEN, HIGH);
+      digitalWrite(LED_RED, LOW);
+      Serial.println("Armed via SMS");
+      SerialLilyGO.println("SMS_REPLY:System armed");
+      SerialLilyGO.println("STATUS:ARMED");
+    } else {
+      SerialLilyGO.println("SMS_REPLY:Already armed");
+    }
+  } else if (cmd == "DISARM") {
+    if (armed) {
+      armed = false;
+      digitalWrite(LED_GREEN, LOW);
+      digitalWrite(LED_RED, HIGH);
+      Serial.println("Disarmed via SMS");
+      SerialLilyGO.println("SMS_REPLY:System disarmed");
+      SerialLilyGO.println("STATUS:DISARMED");
+    } else {
+      SerialLilyGO.println("SMS_REPLY:Already disarmed");
+    }
+  } else if (cmd == "STATUS") {
+    String status = armed ? "ARMED" : "DISARMED";
+    String reply = "Status: " + status;
+    if (lastAlarmTime > 0) {
+      unsigned long ago = (millis() - lastAlarmTime) / 1000;
+      if (ago < 60) reply += "\nLast alarm: " + String(ago) + "s ago";
+      else if (ago < 3600) reply += "\nLast alarm: " + String(ago / 60) + "m ago";
+      else reply += "\nLast alarm: " + String(ago / 3600) + "h ago";
+    } else {
+      reply += "\nNo alarms since boot";
+    }
+    SerialLilyGO.println("SMS_REPLY:" + reply);
+  } else if (cmd == "PHOTO") {
+    SerialLilyGO.println("SMS_REPLY:Capturing photo...");
+    startAlarm("Photo Requested");
+  }
 }
