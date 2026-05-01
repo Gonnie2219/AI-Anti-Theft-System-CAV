@@ -643,21 +643,9 @@ bool sendHeartbeat() {
 // ── Command Polling ──────────────────────────────────────────
 void pollCommands() {
   if (!networkReady) return;
-  if (!tcpConnect()) return;
 
-  String req = "GET /" + String(CMD_TOPIC) + "/json?poll=1&since=" + lastPollId + " HTTP/1.1\r\n";
-  req += "Host: ntfy.sh\r\nConnection: close\r\n\r\n";
-
-  if (!cipSend(req)) { sendATWait("AT+CIPCLOSE=0", 5000); return; }
-
-  // Read full response (wait for close or 10s timeout)
-  unsigned long s = millis(); String resp = "";
-  while (millis() - s < 10000) {
-    while (SerialAT.available()) resp += (char)SerialAT.read();
-    if (resp.indexOf("+IPCLOSE") >= 0 || resp.indexOf("+CIPCLOSE") >= 0) break;
-    delay(50);
-  }
-  sendATWait("AT+CIPCLOSE=0", 5000);
+  String resp = sendHttpGet(String(CMD_TOPIC) + "/json?poll=1&since=" + lastPollId);
+  if (resp.length() == 0) return;
 
   // Parse JSON lines — look for "event":"message" lines
   int searchFrom = 0;
