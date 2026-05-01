@@ -360,18 +360,8 @@ void setup() {
   if (gpsLat.length() > 0) startBody += "\nLocation: " + gpsLat + "," + gpsLon;
   startBody += getBatteryString();
 
-  String startReq = "POST /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
-  startReq += "Host: ntfy.sh\r\nTitle: System Startup\r\n";
-  startReq += "Priority: low\r\nTags: rocket\r\n";
-  startReq += "Content-Type: text/plain\r\n";
-  startReq += "Content-Length: " + String(startBody.length()) + "\r\n";
-  startReq += "Connection: close\r\n\r\n" + startBody;
-
-  if (tcpConnect()) {
-    if (cipSend(startReq)) waitForResponse();
-    delay(500);
-    sendATWait("AT+CIPCLOSE=0", 5000);
-  }
+  String startHdrs = "Title: System Startup\r\nPriority: low\r\nTags: rocket";
+  sendHttpText(String(NTFY_TOPIC), startHdrs, startBody);
   lastHeartbeat = millis();
 }
 
@@ -667,22 +657,13 @@ bool sendTextOnly(String reason) {
   if (gpsLat.length() > 0) body += "\n\nLocation: " + gpsLat + "," + gpsLon + "\n\n[View Location on Google Maps](" + gpsMapsLink + ")";
   body += getBatteryString();
 
-  String req = "POST /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
-  req += "Host: ntfy.sh\r\n";
-  req += "Title: " + String(isRequested ? "Requested Photo" : "Anti-Theft ALERT") + "\r\n";
-  req += "Priority: " + String(isRequested ? "default" : "urgent") + "\r\n";
-  req += "Tags: " + String(isRequested ? "camera" : "rotating_light") + "\r\n";
-  req += "Markdown: yes\r\n";
-  if (gpsMapsLink.length() > 0) req += "Click: " + gpsMapsLink + "\r\n";
-  req += "Content-Type: text/markdown\r\nContent-Length: " + String(body.length()) + "\r\nConnection: close\r\n\r\n" + body;
+  String hdrs = "Title: " + String(isRequested ? "Requested Photo" : "Anti-Theft ALERT");
+  hdrs += "\r\nPriority: " + String(isRequested ? "default" : "urgent");
+  hdrs += "\r\nTags: " + String(isRequested ? "camera" : "rotating_light");
+  hdrs += "\r\nMarkdown: yes";
+  if (gpsMapsLink.length() > 0) hdrs += "\r\nClick: " + gpsMapsLink;
 
-  if (!tcpConnect()) return false;
-  if (!cipSend(req)) { sendATWait("AT+CIPCLOSE=0",5000); return false; }
-  bool ok = waitForResponse();
-  delay(500);
-  sendATWait("AT+CIPCLOSE=0", 5000);
-
-  return ok;
+  return sendHttpText(String(NTFY_TOPIC), hdrs, body);
 }
 
 // ── Status Notification ─────────────────────────────────────
@@ -694,22 +675,11 @@ bool sendStatusNotification(String status) {
   if (gpsLat.length() > 0) body += "\nLocation: " + gpsLat + "," + gpsLon;
   body += getBatteryString();
 
-  String req = "POST /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
-  req += "Host: ntfy.sh\r\nTitle: System " + status + "\r\n";
-  req += "Priority: low\r\n";
-  req += "Tags: " + String(status == "ARMED" ? "lock" : "unlock") + "\r\n";
-  req += "Content-Type: text/plain\r\n";
-  req += "Content-Length: " + String(body.length()) + "\r\n";
-  req += "Connection: close\r\n\r\n" + body;
+  String hdrs = "Title: System " + status;
+  hdrs += "\r\nPriority: low";
+  hdrs += "\r\nTags: " + String(status == "ARMED" ? "lock" : "unlock");
 
-  bool ntfyOk = false;
-  if (tcpConnect()) {
-    if (cipSend(req)) ntfyOk = waitForResponse();
-    delay(500);
-    sendATWait("AT+CIPCLOSE=0", 5000);
-  }
-
-  return ntfyOk;
+  return sendHttpText(String(NTFY_TOPIC), hdrs, body);
 }
 
 // ── Heartbeat ───────────────────────────────────────────────
@@ -797,40 +767,15 @@ void pollCommands() {
 
 // ── Command Acknowledgement ─────────────────────────────────
 bool sendCommandAck(String msg) {
-  String req = "POST /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
-  req += "Host: ntfy.sh\r\n";
-  req += "Title: Command Acknowledged\r\n";
-  req += "Priority: low\r\n";
-  req += "Tags: white_check_mark\r\n";
-  req += "Content-Length: " + String(msg.length()) + "\r\n";
-  req += "Connection: close\r\n\r\n" + msg;
-
-  if (!tcpConnect()) return false;
-  if (!cipSend(req)) { sendATWait("AT+CIPCLOSE=0", 5000); return false; }
-  bool ok = waitForResponse();
-  delay(500);
-  sendATWait("AT+CIPCLOSE=0", 5000);
-  return ok;
+  String hdrs = "Title: Command Acknowledged\r\nPriority: low\r\nTags: white_check_mark";
+  return sendHttpText(String(NTFY_TOPIC), hdrs, msg);
 }
 
 // ── GPS Response ─────────────────────────────────────────────
 bool sendGPSResponse(String body) {
-  String req = "POST /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
-  req += "Host: ntfy.sh\r\n";
-  req += "Title: GPS Location\r\n";
-  req += "Priority: low\r\n";
-  req += "Tags: round_pushpin\r\n";
-  req += "Markdown: yes\r\n";
-  if (gpsMapsLink.length() > 0) req += "Click: " + gpsMapsLink + "\r\n";
-  req += "Content-Length: " + String(body.length()) + "\r\n";
-  req += "Connection: close\r\n\r\n" + body;
-
-  if (!tcpConnect()) return false;
-  if (!cipSend(req)) { sendATWait("AT+CIPCLOSE=0", 5000); return false; }
-  bool ok = waitForResponse();
-  delay(500);
-  sendATWait("AT+CIPCLOSE=0", 5000);
-  return ok;
+  String hdrs = "Title: GPS Location\r\nPriority: low\r\nTags: round_pushpin\r\nMarkdown: yes";
+  if (gpsMapsLink.length() > 0) hdrs += "\r\nClick: " + gpsMapsLink;
+  return sendHttpText(String(NTFY_TOPIC), hdrs, body);
 }
 
 // ── GPS ──────────────────────────────────────────────────────
