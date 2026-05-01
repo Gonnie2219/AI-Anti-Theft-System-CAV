@@ -86,7 +86,6 @@ void ensureNetwork() {
   SerialMon.println("Network lost - re-registering...");
   networkReady = false;
   sendATWait("AT+CGACT=1,1", 10000);
-  sendATWait("AT+NETOPEN", 15000);
   delay(2000);
   while (SerialAT.available()) SerialAT.read();
 
@@ -97,6 +96,146 @@ void ensureNetwork() {
   } else {
     SerialMon.println("Network recovery failed");
   }
+}
+
+// ── HTTP Helpers (SIM7600 HTTP stack) ────────────────────────
+// POST text body to ntfy.sh, returns true on HTTP 200
+bool sendHttpText(String path, String ntfyHeaders, String body) {
+  ensureNetwork();
+  if (!networkReady) return false;
+
+  SerialMon.println("  HTTP POST /" + path);
+  sendATWait("AT+HTTPTERM", 2000);  // defensive cleanup
+  while (SerialAT.available()) SerialAT.read();
+
+  if (sendAT("AT+HTTPINIT", "OK", 5000).indexOf("OK") < 0) return false;
+  sendAT("AT+HTTPPARA=\"URL\",\"http://ntfy.sh/" + path + "\"", "OK", 3000);
+  sendAT("AT+HTTPPARA=\"CONTENT\",\"text/plain\"", "OK", 3000);
+  if (ntfyHeaders.length() > 0)
+    sendAT("AT+HTTPPARA=\"USERDATA\",\"" + ntfyHeaders + "\"", "OK", 3000);
+
+  // Upload body
+  sendAT("AT+HTTPDATA=" + String(body.length()) + ",30000", "DOWNLOAD", 5000);
+  SerialAT.print(body);
+  delay(100);
+  sendAT("", "OK", 5000);  // wait for OK after data upload
+
+  // Send POST (method 1)
+  SerialAT.println("AT+HTTPACTION=1");
+  unsigned long s = millis(); String r = "";
+  int statusCode = 0;
+  while (millis() - s < 30000) {
+    while (SerialAT.available()) r += (char)SerialAT.read();
+    int idx = r.indexOf("+HTTPACTION:");
+    if (idx >= 0) {
+      int c1 = r.indexOf(',', idx);
+      int c2 = r.indexOf(',', c1 + 1);
+      if (c1 > 0 && c2 > c1) statusCode = r.substring(c1 + 1, c2).toInt();
+      break;
+    }
+    delay(100);
+  }
+
+  sendATWait("AT+HTTPTERM", 2000);
+  while (SerialAT.available()) SerialAT.read();
+
+  SerialMon.println(statusCode == 200 ? "  HTTP OK" : ("  HTTP failed: " + String(statusCode)));
+  return statusCode == 200;
+}
+
+// PUT binary body (photo) to ntfy.sh, returns true on HTTP 200
+bool sendHttpBinary(String path, String ntfyHeaders, const uint8_t* data, size_t len) {
+  ensureNetwork();
+  if (!networkReady) return false;
+
+  SerialMon.println("  HTTP PUT /" + path + " (" + String(len) + " bytes)");
+  sendATWait("AT+HTTPTERM", 2000);
+  while (SerialAT.available()) SerialAT.read();
+
+  if (sendAT("AT+HTTPINIT", "OK", 5000).indexOf("OK") < 0) return false;
+  sendAT("AT+HTTPPARA=\"URL\",\"http://ntfy.sh/" + path + "\"", "OK", 3000);
+  sendAT("AT+HTTPPARA=\"CONTENT\",\"application/octet-stream\"", "OK", 3000);
+  if (ntfyHeaders.length() > 0)
+    sendAT("AT+HTTPPARA=\"USERDATA\",\"" + ntfyHeaders + "\"", "OK", 3000);
+
+  // Upload binary data
+  String r = sendAT("AT+HTTPDATA=" + String(len) + ",30000", "DOWNLOAD", 10000);
+  if (r.indexOf("DOWNLOAD") < 0) { sendATWait("AT+HTTPTERM", 2000); return false; }
+  SerialAT.write(data, len);
+  delay(500);
+  sendAT("", "OK", 10000);  // wait for OK after data upload
+
+  // Send PUT (method 4)
+  SerialAT.println("AT+HTTPACTION=4");
+  unsigned long s = millis(); r = "";
+  int statusCode = 0;
+  while (millis() - s < 60000) {
+    while (SerialAT.available()) r += (char)SerialAT.read();
+    int idx = r.indexOf("+HTTPACTION:");
+    if (idx >= 0) {
+      int c1 = r.indexOf(',', idx);
+      int c2 = r.indexOf(',', c1 + 1);
+      if (c1 > 0 && c2 > c1) statusCode = r.substring(c1 + 1, c2).toInt();
+      break;
+    }
+    delay(100);
+  }
+
+  sendATWait("AT+HTTPTERM", 2000);
+  while (SerialAT.available()) SerialAT.read();
+
+  SerialMon.println(statusCode == 200 ? "  HTTP OK" : ("  HTTP failed: " + String(statusCode)));
+  return statusCode == 200;
+}
+
+// GET from ntfy.sh, returns response body (empty on failure)
+String sendHttpGet(String path) {
+  ensureNetwork();
+  if (!networkReady) return "";
+
+  sendATWait("AT+HTTPTERM", 2000);
+  while (SerialAT.available()) SerialAT.read();
+
+  if (sendAT("AT+HTTPINIT", "OK", 5000).indexOf("OK") < 0) return "";
+  sendAT("AT+HTTPPARA=\"URL\",\"http://ntfy.sh/" + path + "\"", "OK", 3000);
+
+  // Send GET (method 0)
+  SerialAT.println("AT+HTTPACTION=0");
+  unsigned long s = millis(); String r = "";
+  int statusCode = 0, respLen = 0;
+  while (millis() - s < 30000) {
+    while (SerialAT.available()) r += (char)SerialAT.read();
+    int idx = r.indexOf("+HTTPACTION:");
+    if (idx >= 0) {
+      int c1 = r.indexOf(',', idx);
+      int c2 = r.indexOf(',', c1 + 1);
+      if (c1 > 0 && c2 > c1) {
+        statusCode = r.substring(c1 + 1, c2).toInt();
+        respLen = r.substring(c2 + 1).toInt();
+      }
+      break;
+    }
+    delay(100);
+  }
+
+  String body = "";
+  if (statusCode == 200 && respLen > 0) {
+    r = sendAT("AT+HTTPREAD=0," + String(respLen), "+HTTPREAD:", 10000);
+    int dataIdx = r.indexOf("+HTTPREAD: ");
+    if (dataIdx >= 0) {
+      int nl = r.indexOf('\n', dataIdx);
+      if (nl >= 0) body = r.substring(nl + 1);
+      // Trim trailing OK
+      int okIdx = body.lastIndexOf("OK");
+      if (okIdx >= 0) body = body.substring(0, okIdx);
+      body.trim();
+    }
+  }
+
+  sendATWait("AT+HTTPTERM", 2000);
+  while (SerialAT.available()) SerialAT.read();
+
+  return body;
 }
 
 // ── Get Modem Time ──────────────────────────────────────────
@@ -191,14 +330,13 @@ void setup() {
   sendAT("AT+CMGF=1", "OK", 2000);   // Text mode SMS
   sendAT("AT+CSCS=\"GSM\"", "OK", 2000); // GSM 7-bit charset
   sendAT("AT+CNMI=2,1,0,0,0", "OK", 2000);  // URC on new SMS
-  sendAT("AT+CGDCONT=1,\"IP\",\"" + String(APN) + "\"","OK",3000);
+  sendAT("AT+CGDCONT=1,\"IPV4V6\",\"" + String(APN) + "\"","OK",3000);
   SerialMon.print("  Registering");
   for (int i = 0; i < 15; i++) {
     String r = sendAT("AT+CREG?","OK",2000);
     if (r.indexOf(",1") >= 0 || r.indexOf(",5") >= 0) {
       SerialMon.println(" registered");
       sendATWait("AT+CGACT=1,1", 10000);
-      sendATWait("AT+NETOPEN", 15000);
       delay(2000); while (SerialAT.available()) SerialAT.read();
       networkReady = true;
       SerialMon.println("  Network ready");
@@ -584,19 +722,8 @@ bool sendHeartbeat() {
   if (gpsLat.length() > 0) body += "\nLocation: " + gpsLat + "," + gpsLon;
   body += getBatteryString();
 
-  String req = "POST /" + String(NTFY_TOPIC) + " HTTP/1.1\r\n";
-  req += "Host: ntfy.sh\r\nTitle: Heartbeat - System OK\r\n";
-  req += "Priority: min\r\n";
-  req += "Tags: green_circle\r\n";
-  req += "Content-Type: text/plain\r\n";
-  req += "Content-Length: " + String(body.length()) + "\r\n";
-  req += "Connection: close\r\n\r\n" + body;
-
-  if (!tcpConnect()) return false;
-  if (!cipSend(req)) { sendATWait("AT+CIPCLOSE=0",5000); return false; }
-  bool ok = waitForResponse();
-  delay(500);
-  sendATWait("AT+CIPCLOSE=0", 5000);
+  String hdrs = "Title: Heartbeat - System OK\r\nPriority: min\r\nTags: green_circle";
+  bool ok = sendHttpText(String(NTFY_TOPIC), hdrs, body);
   SerialMon.println(ok ? "Heartbeat sent" : "Heartbeat failed");
   return ok;
 }
