@@ -10,6 +10,13 @@
  * UART0 (Serial)       = USB debug
  * UART2 (Serial2)      = ESP32-CAM (TX=17, RX=16)
  * UART1 (SerialLilyGO) = LILYGO    (TX=27, RX=26)
+ *
+ * SpeedTalk migration (May 2026):
+ * - Removed the destructive SerialLilyGO drain inside the SMS_CMD: handler.
+ *   Old code did `while (avail) read()` immediately after pulling SMS_CMD,
+ *   which discarded any back-to-back SMS_CMD lines or pending status replies
+ *   that happened to be queued. Now we just process the one line we received
+ *   and let the loop pick up the rest naturally.
  */
 
 #include <RCSwitch.h>
@@ -36,7 +43,7 @@ bool lastReed = LOW;
 unsigned long lastAlarmTime = 0;
 #define DEBOUNCE_MS 5000
 
-// Image buffer (imgBuffer allocated once in setup; imgSize only written/read in alarm task on Core 0)
+// Image buffer (allocated once in setup; only written/read in alarm task on Core 0)
 #define IMG_BUF_SIZE 51200
 uint8_t* imgBuffer = NULL;
 size_t imgSize = 0;
@@ -47,8 +54,11 @@ volatile bool alarmInProgress = false;
 HardwareSerial SerialLilyGO(1);
 SemaphoreHandle_t lilygoMutex;
 
-// Forward declaration
+// Forward declarations
 void alarmTask(void* param);
+void handleSMSCommand(String cmd);
+bool receivePhotoFromCAM();
+void startAlarm(String reason);
 
 void setup() {
   Serial.begin(115200);
@@ -75,6 +85,7 @@ void setup() {
 
   Serial2.setRxBufferSize(2048);
   Serial2.begin(115200, SERIAL_8N1, CAM_RX, CAM_TX);
+  SerialLilyGO.setRxBufferSize(4096);
   SerialLilyGO.begin(115200, SERIAL_8N1, LILYGO_RX, LILYGO_TX);
 
   lilygoMutex = xSemaphoreCreateMutex();
@@ -82,11 +93,12 @@ void setup() {
   Serial.println("UART2  ->  ESP32-CAM");
   Serial.println("UART1  ->  LILYGO");
 
-  // Wait for CAM_READY and LILYGO_READY (up to 25s). Prevents a first-alarm
-  // race where the user triggers a sensor before peripherals finish booting.
+  // Wait for CAM_READY and LILYGO_READY (up to 60s — LILYGO modem boot is slow).
+  // Prevents a first-alarm race where the user triggers a sensor before
+  // peripherals finish booting.
   Serial.println("Waiting for peripherals...");
   bool camReady = false, lilygoReady = false;
-  unsigned long bootDeadline = millis() + 25000;
+  unsigned long bootDeadline = millis() + 60000;
   while (millis() < bootDeadline && !(camReady && lilygoReady)) {
     if (Serial2.available()) {
       String line = Serial2.readStringUntil('\n'); line.trim();
@@ -137,27 +149,35 @@ void loop() {
     }
   }
 
-  // Drain LILYGO responses + handle remote arm/disarm (must run even when disarmed)
+  // Drain LILYGO responses + handle remote arm/disarm/SMS commands
+  // (must run even when disarmed)
   if (!alarmInProgress && xSemaphoreTake(lilygoMutex, pdMS_TO_TICKS(50))) {
     if (SerialLilyGO.available()) {
       String r = SerialLilyGO.readStringUntil('\n'); r.trim();
       if (r.length() > 0) {
         Serial.println("LILYGO: " + r);
-        if (r == "REMOTE_ARM" && !armed) {
-          armed = true;
-          digitalWrite(LED_GREEN, HIGH);
-          digitalWrite(LED_RED, LOW);
-          Serial.println("Remote armed");
+        if (r == "REMOTE_ARM") {
+          if (!armed) {
+            armed = true;
+            digitalWrite(LED_GREEN, HIGH);
+            digitalWrite(LED_RED, LOW);
+            Serial.println("Remote armed");
+          }
           SerialLilyGO.println("STATUS:ARMED");
-        } else if (r == "REMOTE_DISARM" && armed) {
-          armed = false;
-          digitalWrite(LED_GREEN, LOW);
-          digitalWrite(LED_RED, HIGH);
-          Serial.println("Remote disarmed");
+        } else if (r == "REMOTE_DISARM") {
+          if (armed) {
+            armed = false;
+            digitalWrite(LED_GREEN, LOW);
+            digitalWrite(LED_RED, HIGH);
+            Serial.println("Remote disarmed");
+          }
           SerialLilyGO.println("STATUS:DISARMED");
         } else if (r == "REQUEST_PHOTO") {
           startAlarm("Photo Requested");
         } else if (r.startsWith("SMS_CMD:")) {
+          // Process the SMS command. We deliberately do NOT drain SerialLilyGO
+          // here — that would discard back-to-back SMS_CMD lines or pending
+          // status replies. The next loop iteration will pick those up.
           String smsCmd = r.substring(8);
           handleSMSCommand(smsCmd);
         }
@@ -272,7 +292,10 @@ void alarmTask(void* param) {
 
 // ── Receive Photo from CAM ──────────────────────────────────
 bool receivePhotoFromCAM() {
-  unsigned long timeout = millis() + 10000;
+  // Relaxed from 10s -> 15s. UART image transfer at 115200 baud takes
+  // ~5-6 seconds for a 50 KB JPEG; the extra 5s gives margin for CAM
+  // burst capture (3 frames + SD writes) before transfer starts.
+  unsigned long timeout = millis() + 15000;
   bool gotHeader = false;
   size_t expectedSize = 0;
 
@@ -359,9 +382,9 @@ void handleSMSCommand(String cmd) {
     String reply = "Status: " + status;
     if (lastAlarmTime > 0) {
       unsigned long ago = (millis() - lastAlarmTime) / 1000;
-      if (ago < 60) reply += "\nLast alarm: " + String(ago) + "s ago";
+      if (ago < 60)        reply += "\nLast alarm: " + String(ago) + "s ago";
       else if (ago < 3600) reply += "\nLast alarm: " + String(ago / 60) + "m ago";
-      else reply += "\nLast alarm: " + String(ago / 3600) + "h ago";
+      else                 reply += "\nLast alarm: " + String(ago / 3600) + "h ago";
     } else {
       reply += "\nNo alarms since boot";
     }
