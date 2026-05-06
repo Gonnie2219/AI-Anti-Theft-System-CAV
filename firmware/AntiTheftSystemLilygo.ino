@@ -45,6 +45,7 @@ const char    OWNER_PHONE[]    = "+16093589220";
 #define GPS_UPDATE_MS     300000UL     // 5 minutes
 #define NTFY_CMD_TOPIC   "antitheft-gonnie-2219-cmd"
 #define NTFY_CMD_POLL_MS    5000UL     // 5 seconds
+#define WORKER_INGEST_URL  "https://antitheft-whatsapp-bridge.gonnie2219.workers.dev/ingest"
 
 #if USE_NATIVE_SMS
 #define SMS_POLL_MS        60000UL     // safety-net SMS poll
@@ -160,6 +161,9 @@ static bool httpInit(String url, String contentType, String headers) {
   }
   while (SerialAT.available()) SerialAT.read();
 
+  // Toggle SSL based on URL scheme
+  sendAT("AT+HTTPSSL=" + String(url.startsWith("https") ? 1 : 0), "OK", 2000);
+
   String initResp = sendAT("AT+HTTPINIT", "OK", 5000);
   if (initResp.indexOf("OK") < 0) {
     SerialMon.println("[HTTP] HTTPINIT failed. Modem said: " + initResp);
@@ -273,6 +277,32 @@ bool httpPostBinaryRetry(String topic, String headers, const uint8_t* data, size
     }
   }
   return false;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Direct POST to arbitrary URL (for Worker /ingest fast path)
+// ─────────────────────────────────────────────────────────────
+int httpPostDirect(const char* url, String body) {
+  SerialMon.println("[INGEST] POST (" + String(body.length()) + " bytes)");
+  if (!httpInit(String(url), "text/plain", "")) {
+    sendAT("AT+HTTPTERM", "OK", 1000);
+    return -1;
+  }
+
+  SerialAT.print("AT+HTTPDATA=");
+  SerialAT.print(body.length());
+  SerialAT.println(",10000");
+  if (!waitDownloadPrompt(3000)) { sendAT("AT+HTTPTERM", "OK", 1000); return -1; }
+  SerialAT.print(body);
+  if (!waitOK(15000))            { sendAT("AT+HTTPTERM", "OK", 1000); return -1; }
+
+  sendAT("AT+HTTPACTION=1", "OK", 3000);
+  int status = waitHttpAction(30000);
+
+  sendAT("AT+HTTPTERM", "OK", 1000);
+  if (status == 200) SerialMon.println("[INGEST] OK");
+  else               SerialMon.println("[INGEST] failed: " + String(status));
+  return status;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -615,6 +645,16 @@ void handleAlert(String reason) {
   if (gpsLat.length() > 0)     body += "\nLocation: " + gpsLat + "," + gpsLon + "\n" + gpsMapsLink;
 
   bool ntfyOk = httpPostTextRetry(NTFY_TOPIC, headers, body);
+
+  // 4b) Fast path: POST directly to Worker for immediate WhatsApp delivery.
+  //     Single attempt, no retry — cron safety net handles failures.
+  //     Only for real alerts (photo requests don't need WhatsApp).
+  if (!isPhotoRequest) {
+    int ingestRc = httpPostDirect(WORKER_INGEST_URL, body);
+    SerialMon.println(ingestRc == 200
+      ? "[INGEST] Worker accepted"
+      : "[INGEST] Worker failed (cron safety net will handle)");
+  }
 
   // 5) ntfy photo (if we have one)
   if (hasImage && imgSize > 0) {

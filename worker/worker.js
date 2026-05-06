@@ -1,11 +1,13 @@
 /**
  * Cloudflare Worker: ntfy.sh → WhatsApp + SMS Bridge
  *
- * Polls ntfy.sh for anti-theft alerts and forwards them to WhatsApp + SMS
- * via Twilio.  Also accepts inbound SMS webhooks from Twilio and posts
- * commands to the ntfy command topic for the LILYGO to pick up.
+ * Two delivery paths for alerts:
+ *   FAST: LILYGO POSTs directly to /ingest → immediate WhatsApp delivery
+ *   SAFE: Cron polls ntfy every 60s → safety-net WhatsApp + photo matching
+ * Both paths share a body-content-hash dedup key in KV.
  *
- * Deployed with cron trigger (every minute).
+ * Also accepts inbound SMS webhooks from Twilio and posts commands to the
+ * ntfy command topic for the LILYGO to pick up.
  *
  * Required secrets (set via `wrangler secret put`):
  *   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN,
@@ -28,6 +30,11 @@ export default {
 
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    // Fast-path alert ingest from LILYGO (bypasses ntfy→cron 60s delay)
+    if (request.method === "POST" && url.pathname === "/ingest") {
+      return handleIngest(request, env);
+    }
 
     // Inbound SMS webhook from Twilio
     if (request.method === "POST" && url.pathname === "/sms/inbound") {
@@ -53,6 +60,52 @@ function parseDedup(raw) {
   } catch {
     return { whatsapp: false, sms: false };
   }
+}
+
+// Content-hash dedup key shared by /ingest and cron paths
+async function bodyDedupKey(body) {
+  const data = new TextEncoder().encode(body.trim().slice(0, 200));
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  const hex = [...new Uint8Array(hash)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return `body:${hex.slice(0, 16)}`;
+}
+
+// ── Fast-path ingest from LILYGO ─────────────────────────────
+async function handleIngest(request, env) {
+  const body = (await request.text()).trim();
+  if (!body.startsWith("ALERT:")) {
+    return Response.json({ status: "ignored", reason: "not an alert" });
+  }
+
+  const dedupKey = await bodyDedupKey(body);
+  const existing = await env.ANTITHEFT_STATE.get(dedupKey);
+  if (existing) {
+    console.log(`[ingest] dedup hit: ${dedupKey}`);
+    return Response.json({ status: "dedup" });
+  }
+
+  // Format and send WhatsApp immediately (text only, no photo)
+  const alert = { message: body };
+  const message = formatWhatsAppMessage(alert, null);
+  let waOk = false;
+  if (await sendWhatsApp(env, message, null)) {
+    waOk = true;
+    console.log("[ingest] WhatsApp sent");
+  } else {
+    console.error("[ingest] WhatsApp failed");
+  }
+
+  // Write dedup key so cron doesn't re-send the text alert.
+  // Cron can still send a follow-up photo if one arrives.
+  await env.ANTITHEFT_STATE.put(
+    dedupKey,
+    JSON.stringify({ whatsapp: waOk, sms: true, ingest: true }),
+    { expirationTtl: 86400 }
+  );
+
+  return Response.json({ status: "ok", whatsapp: waOk });
 }
 
 async function handleCron(env) {
@@ -104,6 +157,11 @@ async function _handleCron(env) {
       continue;
     }
 
+    // Check if /ingest already sent the text-only WhatsApp for this alert
+    const bKey = await bodyDedupKey(alert.message || "");
+    const ingestDedup = parseDedup(await env.ANTITHEFT_STATE.get(bKey));
+    const ingestHandled = ingestDedup.whatsapp;
+
     // Find matching photo within 30s after the alert
     const matchedPhoto = photos.find(
       (p) => p.time >= alert.time && p.time - alert.time <= 30
@@ -122,11 +180,24 @@ async function _handleCron(env) {
 
     // WhatsApp
     if (!dedup.whatsapp) {
-      const message = formatWhatsAppMessage(alert, aiVerdict);
-      if (await sendWhatsApp(env, message, mediaUrl)) {
+      if (ingestHandled) {
+        // /ingest already sent text-only WhatsApp; send photo follow-up if available
         dedup.whatsapp = true;
+        if (mediaUrl) {
+          const photoMsg = aiVerdict
+            ? `📷 Photo + AI: ${aiVerdict}`
+            : "📷 Alert photo";
+          await sendWhatsApp(env, photoMsg, mediaUrl);
+          console.log(`Photo follow-up for ingest-handled alert ${alert.id}`);
+        }
       } else {
-        console.error(`WhatsApp failed for ${alert.id}`);
+        // Normal cron path: full WhatsApp with text + photo + AI
+        const message = formatWhatsAppMessage(alert, aiVerdict);
+        if (await sendWhatsApp(env, message, mediaUrl)) {
+          dedup.whatsapp = true;
+        } else {
+          console.error(`WhatsApp failed for ${alert.id}`);
+        }
       }
     }
 
@@ -147,6 +218,10 @@ async function _handleCron(env) {
     await env.ANTITHEFT_STATE.put(dedupKey, JSON.stringify(dedup), {
       expirationTtl: 86400,
     });
+    // Also write body dedup key so /ingest won't re-process
+    await env.ANTITHEFT_STATE.put(bKey, JSON.stringify(dedup), {
+      expirationTtl: 86400,
+    });
     if (matchedPhoto) {
       await env.ANTITHEFT_STATE.put(
         `msg:${matchedPhoto.id}`,
@@ -155,7 +230,7 @@ async function _handleCron(env) {
       );
       console.log(`Forwarded alert ${alert.id} with photo ${matchedPhoto.id}`);
     } else {
-      console.log(`Forwarded alert ${alert.id} (wa:${dedup.whatsapp} sms:${dedup.sms})`);
+      console.log(`Forwarded alert ${alert.id} (wa:${dedup.whatsapp} sms:${dedup.sms} ingest:${ingestHandled})`);
     }
   }
 
