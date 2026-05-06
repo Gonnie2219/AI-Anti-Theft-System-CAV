@@ -319,10 +319,11 @@ function handleNotification(msg) {
   const tags = msg.tags || [];
   const attachment = msg.attachment || null;
 
-  if (body.indexOf('DISARMED') >= 0) {
+  var bodyLower = body.toLowerCase();
+  if (bodyLower.indexOf('disarmed') >= 0) {
     updateStatus('DISARMED');
     if (pendingCmd && pendingCmd.cmd === 'DISARM') confirmCommand();
-  } else if (body.indexOf('ARMED') >= 0 && body.indexOf('DISARMED') < 0) {
+  } else if (bodyLower.indexOf('armed') >= 0) {
     updateStatus('ARMED');
     if (pendingCmd && pendingCmd.cmd === 'ARM') confirmCommand();
   }
