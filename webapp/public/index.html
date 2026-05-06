@@ -165,6 +165,7 @@ let map, marker;
 let lastMessageTime = null;
 let lastKnownStatus = null;
 let isOffline = false;
+const seenMsgIds = new Set();
 
 function initDashboard() {
   map = L.map('map').setView([42.35, -83.07], 13);
@@ -219,6 +220,16 @@ function initDashboard() {
 }
 
 function handleNotification(msg) {
+  // Dedup: skip messages already processed (SSE reconnect can replay)
+  if (msg.id) {
+    if (seenMsgIds.has(msg.id)) return;
+    seenMsgIds.add(msg.id);
+    if (seenMsgIds.size > 200) {
+      const iter = seenMsgIds.values();
+      for (let i = 0; i < 100; i++) seenMsgIds.delete(iter.next().value);
+    }
+  }
+
   lastMessageTime = Date.now();
   localStorage.setItem('lastMessageTime', lastMessageTime);
 
