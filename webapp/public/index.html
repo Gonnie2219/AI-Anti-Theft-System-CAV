@@ -5,93 +5,150 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Anti-Theft Dashboard</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔒</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <style>
+  :root {
+    --accent: #0ea5e9;
+    --accent-dim: #0c4a6e;
+    --accent-glow: rgba(14, 165, 233, 0.15);
+    --bg: #0b1120;
+    --card: #141c2e;
+    --border: #1e293b;
+    --text: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --armed: #22c55e;
+    --armed-bg: #052e16;
+    --armed-text: #bbf7d0;
+    --disarmed: #ef4444;
+    --disarmed-bg: #450a0a;
+    --disarmed-text: #fecaca;
+    --radius: 10px;
+    --radius-sm: 6px;
+  }
+
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+  body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px; }
 
   /* Login */
   #login { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
-  #login form { background: #1e293b; padding: 2rem; border-radius: 12px; width: 320px; }
-  #login h2 { text-align: center; margin-bottom: 1.5rem; color: #f8fafc; }
-  #login input { width: 100%; padding: 0.75rem; margin-bottom: 1rem; border: 1px solid #334155; border-radius: 8px; background: #0f172a; color: #e2e8f0; font-size: 1rem; }
-  #login button { width: 100%; padding: 0.75rem; border: none; border-radius: 8px; background: #3b82f6; color: #fff; font-size: 1rem; cursor: pointer; }
-  #login button:hover { background: #2563eb; }
-  #login-error { color: #f87171; text-align: center; margin-top: 0.5rem; display: none; }
+  #login form { background: var(--card); padding: 2rem; border-radius: var(--radius); width: 320px; border: 1px solid var(--border); }
+  #login h2 { text-align: center; margin-bottom: 1.5rem; color: var(--text); font-size: 1.25rem; font-weight: 700; }
+  #login input { width: 100%; padding: 0.7rem 0.85rem; margin-bottom: 0.75rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-size: 0.9rem; font-family: inherit; }
+  #login input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+  #login button { width: 100%; padding: 0.7rem; border: none; border-radius: var(--radius-sm); background: var(--accent); color: #fff; font-size: 0.9rem; font-weight: 600; cursor: pointer; font-family: inherit; }
+  #login button:hover { background: #0284c7; }
+  #login-error { color: var(--disarmed); text-align: center; margin-top: 0.5rem; display: none; font-size: 0.85rem; }
 
   /* Dashboard */
-  #dashboard { display: none; max-width: 800px; margin: 0 auto; padding: 1rem; }
-  header { text-align: center; padding: 1rem 0; }
-  header h1 { font-size: 1.5rem; color: #f8fafc; }
+  #dashboard { display: none; max-width: 960px; margin: 0 auto; padding: 1rem; }
 
-  .status-card { text-align: center; padding: 1.5rem; border-radius: 12px; margin: 1rem 0; font-size: 1.25rem; font-weight: 700; }
-  .status-armed { background: #166534; color: #bbf7d0; }
-  .status-disarmed { background: #991b1b; color: #fecaca; }
-  .status-unknown { background: #334155; color: #94a3b8; }
-  .status-offline { background: #1e293b; color: #64748b; }
-  .status-subtitle { font-size: 0.8rem; color: #64748b; text-align: center; margin-top: 0.25rem; line-height: 1.5; }
-  .status-subtitle a { color: #60a5fa; text-decoration: none; }
-  .status-subtitle a:hover { text-decoration: underline; }
+  /* Header */
+  .dash-header { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 0; margin-bottom: 0.75rem; border-bottom: 1px solid var(--border); }
+  .dash-header h1 { font-size: 1.1rem; font-weight: 700; color: var(--text); white-space: nowrap; }
+  .status-pill { padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; flex-shrink: 0; }
+  .pill-armed { background: var(--armed-bg); color: var(--armed-text); border: 1px solid var(--armed); }
+  .pill-disarmed { background: var(--disarmed-bg); color: var(--disarmed-text); border: 1px solid var(--disarmed); }
+  .pill-unknown { background: var(--border); color: var(--text-muted); border: 1px solid var(--text-muted); }
+  .pill-offline { background: #1e293b; color: #475569; border: 1px solid #334155; }
+  .last-seen { margin-left: auto; font-size: 0.75rem; color: var(--text-muted); white-space: nowrap; }
+  .last-seen.offline { color: #ef4444; }
 
+  .status-pill.confirming { animation: pillPulse 0.6s ease-in-out; }
+  @keyframes pillPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-  .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin: 1rem 0; }
-  .controls button { padding: 1rem; border: none; border-radius: 10px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
-  .controls button:hover { opacity: 0.85; }
-  .controls button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-arm { background: #22c55e; color: #052e16; }
-  .btn-disarm { background: #ef4444; color: #fff; }
-  .btn-gps { background: #3b82f6; color: #fff; }
-  .btn-photo { background: #a855f7; color: #fff; }
+  /* Offline banner */
+  .offline-banner { display: none; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.5rem 0.75rem; margin-bottom: 0.75rem; font-size: 0.75rem; color: var(--text-muted); line-height: 1.5; }
+  .offline-banner a { color: var(--accent); text-decoration: none; }
+  .offline-banner a:hover { text-decoration: underline; }
 
-  #map { height: 400px; border-radius: 12px; margin: 1rem 0; z-index: 0; }
+  /* Hero Row */
+  .hero-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 0.75rem; }
+  .hero-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .hero-card-label { padding: 0.5rem 0.75rem; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); border-bottom: 1px solid var(--border); }
+  #map { height: 280px; z-index: 0; }
+  .hero-photo { position: relative; min-height: 280px; display: flex; align-items: center; justify-content: center; background: var(--bg); }
+  .hero-photo-placeholder { color: var(--text-muted); font-size: 0.8rem; text-align: center; padding: 1rem; }
+  .hero-photo img { width: 100%; height: 280px; object-fit: cover; cursor: zoom-in; display: block; }
+  .hero-photo .ai-overlay { position: absolute; bottom: 0; left: 0; right: 0; padding: 0.5rem 0.75rem; background: linear-gradient(transparent, rgba(0,0,0,0.8)); }
+  .hero-photo .ai-badge { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; }
+  .hero-photo .photo-meta { font-size: 0.7rem; color: rgba(255,255,255,0.7); margin-top: 0.25rem; }
+  .ai-high { background: #991b1b; color: #fca5a5; }
+  .ai-medium { background: #854d0e; color: #fde047; }
+  .ai-low { background: #14532d; color: #86efac; }
+  .ai-loading { background: rgba(30,41,59,0.9); color: #94a3b8; }
 
-  .feed { margin: 1rem 0; }
-  .feed h3 { margin-bottom: 0.75rem; color: #94a3b8; }
-  #feed-list { max-height: 600px; overflow-y: auto; }
-  .feed-item { background: #1e293b; padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 0.5rem; border-left: 4px solid #334155; }
-  .feed-item.urgent { border-left-color: #ef4444; background: #1c1517; }
-  .feed-item.low { border-left-color: #3b82f6; }
-  .feed-item.min { border-left-color: #64748b; }
-  .feed-item .title { font-weight: 600; margin-bottom: 0.25rem; font-size: 1.05rem; }
-  .feed-item .time { font-size: 0.75rem; color: #64748b; }
-  .feed-item .body { margin-top: 0.25rem; font-size: 0.9rem; color: #cbd5e1; white-space: pre-wrap; }
-  .feed-item img { width: 100%; border-radius: 8px; margin-top: 0.5rem; }
-  .feed-item.gps { border-left-color: #3b82f6; }
-
-  @keyframes slideIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
-  .feed-item { animation: slideIn 0.3s ease-out; }
-
-  .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.9); display: flex; align-items: center; justify-content: center; z-index: 10000; cursor: zoom-out; }
-  .lightbox img { max-width: 95vw; max-height: 95vh; border-radius: 8px; }
-
-  .photo-wrap { position: relative; display: inline-block; width: 100%; margin-top: 0.5rem; }
-  .photo-wrap img { width: 100%; border-radius: 8px; cursor: zoom-in; }
-  .btn-download { position: absolute; top: 0.5rem; right: 0.5rem; background: rgba(0,0,0,0.6); color: #fff; border: none; border-radius: 6px; padding: 0.3rem 0.5rem; cursor: pointer; font-size: 1rem; }
-  .btn-download:hover { background: rgba(0,0,0,0.8); }
-
-  @media (max-width: 640px) {
-    #dashboard { padding: 0.5rem; }
-    .controls button { padding: 0.75rem; font-size: 0.9rem; }
-    #map { height: 300px; }
-  }
-  .email-badge { display: inline-block; margin-top: 0.4rem; padding: 0.15rem 0.5rem; border-radius: 4px; background: #1e40af; color: #93c5fd; font-size: 0.7rem; font-weight: 600; }
-  .ai-verdict { display: inline-block; margin-top: 0.5rem; padding: 0.4rem 0.75rem; border-radius: 6px; font-size: 0.8rem; font-weight: 600; }
-  .ai-verdict.threat-high { background: #991b1b; color: #fca5a5; }
-  .ai-verdict.threat-medium { background: #854d0e; color: #fde047; }
-  .ai-verdict.threat-low { background: #14532d; color: #86efac; }
-  .ai-verdict.threat-loading { background: #1e293b; color: #94a3b8; }
+  /* Action Bar */
+  .action-bar { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
+  .btn-group { display: flex; gap: 0.35rem; flex: 1; }
+  .action-bar button { flex: 1; padding: 0.6rem 0.5rem; border: none; border-radius: var(--radius-sm); font-size: 0.8rem; font-weight: 600; cursor: pointer; font-family: inherit; transition: opacity 0.15s, transform 0.1s; }
+  .action-bar button:hover { opacity: 0.85; }
+  .action-bar button:active { transform: scale(0.97); }
+  .action-bar button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+  .btn-arm { background: var(--armed); color: #052e16; }
+  .btn-disarm { background: var(--disarmed); color: #fff; }
+  .btn-gps { background: var(--accent); color: #fff; }
+  .btn-photo { background: #7c3aed; color: #fff; }
 
   /* Optimistic UI */
-  .controls button .spinner { display: inline-block; width: 1em; height: 1em; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 0.3rem; }
+  .action-bar button .spinner { display: inline-block; width: 0.85em; height: 0.85em; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 0.25rem; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .controls button.pending { opacity: 0.7; cursor: wait; }
-  .controls button.failed { outline: 2px solid #ef4444; outline-offset: -2px; }
-  .status-card.status-confirming { animation: statusPulse 0.6s ease-in-out; }
-  @keyframes statusPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+  .action-bar button.pending { opacity: 0.65; cursor: wait; }
+  .action-bar button.failed { outline: 2px solid var(--disarmed); outline-offset: -2px; }
+
+  /* Event Feed */
+  .feed-section { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); }
+  .feed-header { padding: 0.5rem 0.75rem; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); border-bottom: 1px solid var(--border); }
+  #feed-list { max-height: 400px; overflow-y: auto; }
+  .feed-item { display: flex; align-items: flex-start; gap: 0.6rem; padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border); animation: fadeIn 0.25s ease-out; }
+  .feed-item:last-child { border-bottom: none; }
+  .feed-item.urgent { background: rgba(239, 68, 68, 0.06); }
+  .feed-time { font-size: 0.7rem; color: var(--text-muted); white-space: nowrap; min-width: 52px; padding-top: 0.1rem; }
+  .feed-content { flex: 1; min-width: 0; }
+  .feed-reason { font-weight: 600; font-size: 0.85rem; color: var(--text); }
+  .feed-body { font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.15rem; white-space: pre-wrap; word-break: break-word; }
+  .feed-body a { color: var(--accent); text-decoration: none; }
+  .feed-body a:hover { text-decoration: underline; }
+  .feed-badges { display: flex; gap: 0.35rem; margin-top: 0.3rem; flex-wrap: wrap; }
+  .feed-badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: 600; }
+  .feed-thumb { width: 48px; height: 48px; border-radius: var(--radius-sm); object-fit: cover; cursor: zoom-in; flex-shrink: 0; }
+  .feed-empty { padding: 2rem; text-align: center; color: var(--text-muted); font-size: 0.8rem; }
+
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+  /* Lightbox */
+  .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.92); display: flex; align-items: center; justify-content: center; z-index: 10000; cursor: zoom-out; }
+  .lightbox img { max-width: 95vw; max-height: 95vh; border-radius: var(--radius-sm); }
 
   /* Toast */
-  #toast { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); background: #1e40af; color: #e0e7ff; padding: 0.6rem 1.2rem; border-radius: 8px; font-size: 0.85rem; font-weight: 600; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 9999; }
+  #toast { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); background: var(--accent-dim); color: #e0f2fe; padding: 0.5rem 1rem; border-radius: var(--radius-sm); font-size: 0.8rem; font-weight: 600; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 9999; }
   #toast.show { opacity: 1; }
+
+  /* Scrollbar */
+  #feed-list::-webkit-scrollbar { width: 4px; }
+  #feed-list::-webkit-scrollbar-track { background: transparent; }
+  #feed-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* Mobile */
+  @media (max-width: 640px) {
+    #dashboard { padding: 0.5rem; }
+    .hero-row { grid-template-columns: 1fr; }
+    #map { height: 220px; }
+    .hero-photo, .hero-photo img { min-height: 200px; height: 200px; }
+    .action-bar { flex-wrap: wrap; }
+    .btn-group { flex: 1 1 45%; }
+    .action-bar button { padding: 0.7rem 0.4rem; font-size: 0.78rem; }
+    .dash-header h1 { font-size: 0.95rem; }
+  }
+  @media (max-width: 380px) {
+    .dash-header { flex-wrap: wrap; gap: 0.4rem; }
+    .last-seen { margin-left: 0; }
+    .btn-group { flex: 1 1 100%; }
+    .feed-thumb { width: 40px; height: 40px; }
+  }
 </style>
 </head>
 <body>
@@ -109,23 +166,43 @@
 
 <!-- Dashboard -->
 <div id="dashboard">
-  <header><h1>Anti-Theft Dashboard</h1></header>
-
-  <div id="status-card" class="status-card status-unknown">Unknown</div>
-  <div class="status-subtitle" id="status-subtitle"></div>
-
-  <div class="controls">
-    <button id="btn-arm" class="btn-arm" onclick="sendCommand('ARM', this)">🛡️ Arm</button>
-    <button id="btn-disarm" class="btn-disarm" onclick="sendCommand('DISARM', this)">🔓 Disarm</button>
-    <button id="btn-gps" class="btn-gps" onclick="sendCommand('GPS', this)">📍 Request GPS</button>
-    <button id="btn-photo" class="btn-photo" onclick="sendCommand('PHOTO', this)">📷 Request Photo</button>
+  <div class="dash-header">
+    <h1>Anti-Theft Dashboard</h1>
+    <span id="status-pill" class="status-pill pill-unknown">Unknown</span>
+    <span id="last-seen" class="last-seen"></span>
   </div>
 
-  <div id="map"></div>
+  <div id="offline-banner" class="offline-banner"></div>
 
-  <div class="feed">
-    <h3>Notifications</h3>
-    <div id="feed-list"></div>
+  <div class="hero-row">
+    <div class="hero-card">
+      <div class="hero-card-label">Live Map</div>
+      <div id="map"></div>
+    </div>
+    <div class="hero-card">
+      <div class="hero-card-label">Last Photo</div>
+      <div id="hero-photo" class="hero-photo">
+        <div class="hero-photo-placeholder">No photos yet</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="action-bar">
+    <div class="btn-group">
+      <button id="btn-arm" class="btn-arm" onclick="sendCommand('ARM', this)">Arm</button>
+      <button id="btn-disarm" class="btn-disarm" onclick="sendCommand('DISARM', this)">Disarm</button>
+    </div>
+    <div class="btn-group">
+      <button id="btn-gps" class="btn-gps" onclick="sendCommand('GPS', this)">GPS</button>
+      <button id="btn-photo" class="btn-photo" onclick="sendCommand('PHOTO', this)">Photo</button>
+    </div>
+  </div>
+
+  <div class="feed-section">
+    <div class="feed-header">Events</div>
+    <div id="feed-list">
+      <div class="feed-empty">No events yet</div>
+    </div>
   </div>
 </div>
 
@@ -160,15 +237,18 @@ document.getElementById('login-form').addEventListener('submit', async function(
 
 // --- Dashboard ---
 let map, marker;
+let gpsTrail = [];
+let trailLine = null;
 let lastMessageTime = null;
 let lastKnownStatus = null;
 let isOffline = false;
 const seenMsgIds = new Set();
 
 function initDashboard() {
-  map = L.map('map').setView([42.35, -83.07], 13);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '&copy; OpenStreetMap contributors'
+  map = L.map('map', { zoomControl: false }).setView([42.35, -83.07], 13);
+  L.control.zoom({ position: 'bottomright' }).addTo(map);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; <a href="https://carto.com/">CARTO</a>'
   }).addTo(map);
 
   // Restore persisted state
@@ -182,14 +262,22 @@ function initDashboard() {
     var parts = savedGPS.split(',');
     var lat = parseFloat(parts[0]), lon = parseFloat(parts[1]);
     if (!isNaN(lat) && !isNaN(lon)) {
-      marker = L.marker([lat, lon]).addTo(map);
+      marker = L.circleMarker([lat, lon], { radius: 7, color: '#0ea5e9', fillColor: '#0ea5e9', fillOpacity: 0.9, weight: 2 }).addTo(map);
       map.setView([lat, lon], 15);
     }
   }
 
-  checkOfflineStatus();
+  var savedTrail = localStorage.getItem('gpsTrail');
+  if (savedTrail) {
+    try { gpsTrail = JSON.parse(savedTrail); } catch(e) { gpsTrail = []; }
+    if (gpsTrail.length > 1) {
+      trailLine = L.polyline(gpsTrail, { color: '#0ea5e9', weight: 2, opacity: 0.4, dashArray: '4 6' }).addTo(map);
+    }
+  }
 
-  // Connect to SSE stream for real-time notifications
+  checkOfflineStatus();
+  updateLastSeen();
+
   const evtSource = new EventSource('https://ntfy.sh/' + ALERT_TOPIC + '/sse');
   evtSource.addEventListener('message', function(e) {
     try {
@@ -205,10 +293,10 @@ function initDashboard() {
   };
 
   setInterval(checkOfflineStatus, 30000);
+  setInterval(updateLastSeen, 30000);
 }
 
 function handleNotification(msg) {
-  // Dedup: skip messages already processed (SSE reconnect can replay)
   if (msg.id) {
     if (seenMsgIds.has(msg.id)) return;
     seenMsgIds.add(msg.id);
@@ -231,7 +319,6 @@ function handleNotification(msg) {
   const tags = msg.tags || [];
   const attachment = msg.attachment || null;
 
-  // Update armed/disarmed status + confirm pending commands
   if (body.indexOf('DISARMED') >= 0) {
     updateStatus('DISARMED');
     if (pendingCmd && pendingCmd.cmd === 'DISARM') confirmCommand();
@@ -240,130 +327,182 @@ function handleNotification(msg) {
     if (pendingCmd && pendingCmd.cmd === 'ARM') confirmCommand();
   }
 
-  // Confirm GPS/PHOTO commands on any relevant response
   if (pendingCmd && pendingCmd.cmd === 'GPS' && body.indexOf('Location:') >= 0) confirmCommand();
   if (pendingCmd && pendingCmd.cmd === 'PHOTO' && (attachment || body.indexOf('Photo') >= 0)) confirmCommand();
 
-  // Update map if location found
   const locMatch = body.match(/Location:\s*([-\d.]+),([-\d.]+)/);
   if (locMatch) {
     const lat = parseFloat(locMatch[1]);
     const lon = parseFloat(locMatch[2]);
     if (!isNaN(lat) && !isNaN(lon)) {
-      if (marker) marker.setLatLng([lat, lon]);
-      else marker = L.marker([lat, lon]).addTo(map);
-      map.setView([lat, lon], 15);
-      localStorage.setItem('lastGPS', lat + ',' + lon);
+      updateMapPosition(lat, lon);
     }
   }
 
-  // Add to feed (get reference to the new feed item)
   const feedItem = addFeedItem(title, body, priority, attachment);
 
-  // AI-analyze photos
+  if (attachment && attachment.url) {
+    showHeroPhoto(attachment.url, title, body);
+  }
+
   if (attachment && attachment.url && attachment.name && /\.jpe?g$/i.test(attachment.name)) {
     analyzePhoto(attachment.url, feedItem);
   }
 
-  // Send email for intrusion alerts only (skip if this message was our own email forward)
   if ((title.toLowerCase().startsWith('anti-theft alert') || priority >= 5 || body.startsWith('ALERT:')) && tags.indexOf('email-forwarded') < 0) {
     sendEmailAlert(title, body, feedItem, msg.id);
   }
 }
 
 function updateStatus(status) {
-  const card = document.getElementById('status-card');
-  card.textContent = status;
-  card.className = 'status-card ' + (status === 'ARMED' ? 'status-armed' : 'status-disarmed');
+  const pill = document.getElementById('status-pill');
+  pill.textContent = status;
+  if (status === 'ARMED') {
+    pill.className = 'status-pill pill-armed';
+  } else if (status === 'DISARMED') {
+    pill.className = 'status-pill pill-disarmed';
+  } else {
+    pill.className = 'status-pill pill-unknown';
+  }
   lastKnownStatus = status;
   localStorage.setItem('lastKnownStatus', status);
   isOffline = false;
-  document.getElementById('status-subtitle').textContent = '';
+  document.getElementById('offline-banner').style.display = 'none';
+  updateLastSeen();
+}
+
+function updateLastSeen() {
+  const el = document.getElementById('last-seen');
+  if (!lastMessageTime) { el.textContent = ''; return; }
+  const elapsed = Date.now() - lastMessageTime;
+  const mins = Math.floor(elapsed / 60000);
+  const hrs = Math.floor(mins / 60);
+  if (mins < 1) el.textContent = 'just now';
+  else if (mins < 60) el.textContent = mins + 'm ago';
+  else if (hrs < 24) el.textContent = hrs + 'h ' + (mins % 60) + 'm ago';
+  else el.textContent = Math.floor(hrs / 24) + 'd ago';
+  el.className = isOffline ? 'last-seen offline' : 'last-seen';
 }
 
 function checkOfflineStatus() {
   if (!lastMessageTime) return;
   const elapsed = Date.now() - lastMessageTime;
-  if (elapsed > 900000) { // 15 min — matches 5-min heartbeat with margin
+  if (elapsed > 900000) {
     isOffline = true;
-    const card = document.getElementById('status-card');
-    card.textContent = 'SYSTEM OFFLINE';
-    card.className = 'status-card status-offline';
+    const pill = document.getElementById('status-pill');
+    pill.textContent = 'OFFLINE';
+    pill.className = 'status-pill pill-offline';
+    updateLastSeen();
 
-    // Format elapsed time as "X hrs Y min ago" or "Y min ago"
     const totalMins = Math.floor(elapsed / 60000);
     const hrs = Math.floor(totalMins / 60);
     const mins = totalMins % 60;
-    const timeAgo = hrs > 0 ? hrs + ' hrs ' + mins + ' min ago' : mins + ' min ago';
+    const timeAgo = hrs > 0 ? hrs + 'h ' + mins + 'm ago' : mins + 'm ago';
 
-    var line1 = 'Last seen: ' + timeAgo;
-    if (lastKnownStatus) line1 += ' · Last known: ' + lastKnownStatus;
-
-    // Format last contact as "Mon Apr 14, 8:43 AM"
+    const dt = new Date(lastMessageTime);
     const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
     const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    const dt = new Date(lastMessageTime);
     var hr = dt.getHours();
     const ampm = hr >= 12 ? 'PM' : 'AM';
     hr = hr % 12 || 12;
-    const minStr = String(dt.getMinutes()).padStart(2, '0');
-    const dateStr = days[dt.getDay()] + ' ' + months[dt.getMonth()] + ' ' + dt.getDate() + ', ' + hr + ':' + minStr + ' ' + ampm;
-    var line2 = 'Last contact: ' + dateStr;
+    const dateStr = days[dt.getDay()] + ' ' + months[dt.getMonth()] + ' ' + dt.getDate() + ', ' + hr + ':' + String(dt.getMinutes()).padStart(2, '0') + ' ' + ampm;
+
+    var html = 'Last seen ' + timeAgo;
+    if (lastKnownStatus) html += ' &middot; Was ' + lastKnownStatus;
+    html += '<br>Last contact: ' + dateStr;
 
     var savedGPS = localStorage.getItem('lastGPS');
     if (savedGPS) {
       var parts = savedGPS.split(',');
-      var lat = parts[0], lon = parts[1];
-      if (lat && lon) {
-        line2 += ' · Last location: <a href="https://www.google.com/maps?q=' + lat + ',' + lon + '" target="_blank">' + lat + ', ' + lon + '</a>';
+      if (parts[0] && parts[1]) {
+        html += ' &middot; <a href="https://www.google.com/maps?q=' + parts[0] + ',' + parts[1] + '" target="_blank">Last location</a>';
       }
     }
 
-    document.getElementById('status-subtitle').innerHTML = line1 + '<br>' + line2;
+    var banner = document.getElementById('offline-banner');
+    banner.innerHTML = html;
+    banner.style.display = 'block';
   }
+}
+
+function updateMapPosition(lat, lon) {
+  if (marker) marker.setLatLng([lat, lon]);
+  else marker = L.circleMarker([lat, lon], { radius: 7, color: '#0ea5e9', fillColor: '#0ea5e9', fillOpacity: 0.9, weight: 2 }).addTo(map);
+  map.setView([lat, lon], 15);
+  localStorage.setItem('lastGPS', lat + ',' + lon);
+
+  gpsTrail.push([lat, lon]);
+  if (gpsTrail.length > 50) gpsTrail = gpsTrail.slice(-50);
+  localStorage.setItem('gpsTrail', JSON.stringify(gpsTrail));
+  if (trailLine) map.removeLayer(trailLine);
+  if (gpsTrail.length > 1) {
+    trailLine = L.polyline(gpsTrail, { color: '#0ea5e9', weight: 2, opacity: 0.4, dashArray: '4 6' }).addTo(map);
+  }
+}
+
+function showHeroPhoto(url, title, body) {
+  var panel = document.getElementById('hero-photo');
+  var safeUrl = escapeHtml(url);
+  var reason = '';
+  if (body.startsWith('ALERT:')) reason = body.split('\n')[0].substring(6).trim();
+  else if (title) reason = title;
+  var timeStr = new Date().toLocaleTimeString();
+  panel.innerHTML = '<img src="' + safeUrl + '" alt="Photo" onclick="openLightbox(\'' + safeUrl + '\')">' +
+    '<div class="ai-overlay">' +
+    '<div id="hero-ai-badge" class="ai-badge ai-loading">Analyzing...</div>' +
+    '<div class="photo-meta">' + escapeHtml(timeStr + (reason ? ' \u00b7 ' + reason : '')) + '</div>' +
+    '</div>';
 }
 
 function formatBody(text) {
   let s = escapeHtml(text);
   s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" style="color:#60a5fa">$1</a>');
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
   s = s.replace(/(^|[\s,])([-]?\d{1,3}\.\d{3,},\s?[-]?\d{1,3}\.\d{3,})/g, function(match, pre, coords) {
     var c = coords.replace(/\s/g, '');
-    return pre + '<a href="https://www.google.com/maps?q=' + c + '" target="_blank" style="color:#60a5fa">' + coords + '</a>';
+    return pre + '<a href="https://www.google.com/maps?q=' + c + '" target="_blank">' + coords + '</a>';
   });
   return s;
 }
 
 function addFeedItem(title, body, priority, attachment) {
   const list = document.getElementById('feed-list');
+
+  var placeholder = list.querySelector('.feed-empty');
+  if (placeholder) placeholder.remove();
+
+  var wasAtTop = list.scrollTop <= 10;
+
   const item = document.createElement('div');
   item.className = 'feed-item';
   if (priority >= 5) item.className += ' urgent';
-  else if (priority <= 2) item.className += ' low';
-  if (priority <= 1) item.className += ' min';
-  if (title && (title.indexOf('GPS') >= 0 || title.indexOf('Location') >= 0)) item.className += ' gps';
 
-  const now = new Date().toLocaleTimeString();
-  let html = '<div class="title">' + escapeHtml(title || 'Notification') + '</div>';
-  html += '<div class="time">' + now + '</div>';
-  if (body) html += '<div class="body">' + formatBody(body) + '</div>';
+  const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  var html = '<div class="feed-time">' + now + '</div>';
+  html += '<div class="feed-content">';
+  html += '<div class="feed-reason">' + escapeHtml(title || 'Notification') + '</div>';
+  if (body) html += '<div class="feed-body">' + formatBody(body) + '</div>';
+  html += '<div class="feed-badges"></div>';
+  html += '</div>';
+
   if (attachment && attachment.url) {
-    const safeUrl = escapeHtml(attachment.url);
-    html += '<div class="photo-wrap">';
-    html += '<img src="' + safeUrl + '" alt="Photo" onclick="openLightbox(\'' + safeUrl + '\')">';
-    html += '<button class="btn-download" data-url="' + safeUrl + '" title="Download">⬇</button>';
-    html += '</div>';
+    var safeUrl = escapeHtml(attachment.url);
+    html += '<img class="feed-thumb" src="' + safeUrl + '" alt="" data-url="' + safeUrl + '">';
   }
+
   item.innerHTML = html;
-  var dlBtn = item.querySelector('.btn-download');
-  if (dlBtn) {
-    dlBtn.addEventListener('click', function(e) {
-      e.stopPropagation();
-      window.open(this.getAttribute('data-url'), '_blank');
-    });
+
+  var thumb = item.querySelector('.feed-thumb');
+  if (thumb) {
+    thumb.addEventListener('click', function() { openLightbox(this.getAttribute('data-url')); });
   }
+
   list.insertBefore(item, list.firstChild);
-  while (list.children.length > 50) list.removeChild(list.lastChild);
+  while (list.children.length > 10) list.removeChild(list.lastChild);
+
+  if (wasAtTop) list.scrollTop = 0;
+
   return item;
 }
 
@@ -375,7 +514,6 @@ function openLightbox(src) {
   document.body.appendChild(overlay);
 }
 
-
 function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
@@ -384,7 +522,6 @@ function escapeHtml(text) {
 
 // --- Email Alert via ntfy.sh Email header ---
 async function sendEmailAlert(title, body, feedItem, msgId) {
-  // Dedup across tabs using localStorage
   if (msgId) {
     const dedupKey = 'email_sent:' + msgId;
     if (localStorage.getItem(dedupKey)) return;
@@ -402,27 +539,24 @@ async function sendEmailAlert(title, body, feedItem, msgId) {
       body: body
     });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    // Add "Email sent" badge to the feed item
-    const badge = document.createElement('span');
-    badge.className = 'email-badge';
-    badge.textContent = 'Email sent ' + new Date().toLocaleTimeString();
-    feedItem.appendChild(badge);
-    showToast('Email alert sent to ' + EMAIL_TO);
+    var badges = feedItem.querySelector('.feed-badges');
+    if (badges) {
+      badges.innerHTML += '<span class="feed-badge" style="background:#1e40af;color:#93c5fd">Email sent</span>';
+    }
+    showToast('Email alert sent');
   } catch (err) {
-    const badge = document.createElement('span');
-    badge.className = 'email-badge';
-    badge.style.background = '#991b1b';
-    badge.style.color = '#fecaca';
-    badge.textContent = 'Email failed';
-    feedItem.appendChild(badge);
+    var badges = feedItem.querySelector('.feed-badges');
+    if (badges) {
+      badges.innerHTML += '<span class="feed-badge" style="background:#991b1b;color:#fecaca">Email failed</span>';
+    }
   }
 }
 
 async function analyzePhoto(imageUrl, feedItem) {
-  const badge = document.createElement('div');
-  badge.className = 'ai-verdict threat-loading';
-  badge.textContent = 'AI Analyzing...';
-  feedItem.appendChild(badge);
+  var badges = feedItem.querySelector('.feed-badges');
+  if (badges) {
+    badges.innerHTML += '<span class="feed-badge ai-loading" data-ai="true">AI analyzing...</span>';
+  }
   try {
     const resp = await fetch('/api/analyze', {
       method: 'POST',
@@ -431,11 +565,31 @@ async function analyzePhoto(imageUrl, feedItem) {
     });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
-    badge.className = 'ai-verdict threat-' + data.threatLevel.toLowerCase();
-    badge.textContent = data.threatLevel + ': ' + data.verdict;
+    var level = data.threatLevel.toLowerCase();
+    var cssClass = 'ai-' + level;
+
+    var aiBadge = feedItem.querySelector('[data-ai]');
+    if (aiBadge) {
+      aiBadge.className = 'feed-badge ' + cssClass;
+      aiBadge.textContent = data.threatLevel + ': ' + data.verdict;
+    }
+
+    var heroBadge = document.getElementById('hero-ai-badge');
+    if (heroBadge) {
+      heroBadge.className = 'ai-badge ' + cssClass;
+      heroBadge.textContent = data.threatLevel + ': ' + data.verdict;
+    }
   } catch (err) {
-    badge.className = 'ai-verdict threat-loading';
-    badge.textContent = 'AI analysis unavailable';
+    var aiBadge = feedItem.querySelector('[data-ai]');
+    if (aiBadge) {
+      aiBadge.className = 'feed-badge ai-loading';
+      aiBadge.textContent = 'AI unavailable';
+    }
+    var heroBadge = document.getElementById('hero-ai-badge');
+    if (heroBadge) {
+      heroBadge.className = 'ai-badge ai-loading';
+      heroBadge.textContent = 'AI unavailable';
+    }
   }
 }
 
@@ -449,22 +603,20 @@ function showToast(message) {
 }
 
 // --- Optimistic Command UI ---
-var pendingCmd = null;     // { cmd, btn, timer, originalText, previousStatus }
-var BTN_LABELS = { ARM: '🛡️ Arm', DISARM: '🔓 Disarm', GPS: '📍 Request GPS', PHOTO: '📷 Request Photo' };
-var BTN_PENDING = { ARM: 'Arming…', DISARM: 'Disarming…', GPS: 'Locating…', PHOTO: 'Capturing…' };
+var pendingCmd = null;
+var BTN_LABELS = { ARM: 'Arm', DISARM: 'Disarm', GPS: 'GPS', PHOTO: 'Photo' };
+var BTN_PENDING = { ARM: 'Arming\u2026', DISARM: 'Disarming\u2026', GPS: 'Locating\u2026', PHOTO: 'Capturing\u2026' };
 
 async function sendCommand(cmd, btn) {
-  if (pendingCmd) return; // one at a time
+  if (pendingCmd) return;
 
   var originalText = btn.innerHTML;
   var previousStatus = lastKnownStatus;
 
-  // Optimistic state
   btn.innerHTML = '<span class="spinner"></span>' + BTN_PENDING[cmd];
   btn.classList.add('pending');
   btn.disabled = true;
 
-  // Optimistic status pill flip
   if (cmd === 'ARM') updateStatus('ARMED');
   else if (cmd === 'DISARM') updateStatus('DISARMED');
 
@@ -479,8 +631,7 @@ async function sendCommand(cmd, btn) {
     return;
   }
 
-  // Start 20s confirmation timeout
-  pendingCmd.timer = setTimeout(function() { markCommandFailed('No response in 20s'); }, 20000);
+  pendingCmd.timer = setTimeout(function() { markCommandFailed('No response'); }, 20000);
 }
 
 function markCommandFailed(reason) {
@@ -489,21 +640,19 @@ function markCommandFailed(reason) {
   var p = pendingCmd;
   pendingCmd = null;
 
-  // Revert status pill
   if (p.cmd === 'ARM' || p.cmd === 'DISARM') {
     if (p.previousStatus) updateStatus(p.previousStatus);
     else {
-      var card = document.getElementById('status-card');
-      card.textContent = 'Unknown';
-      card.className = 'status-card status-unknown';
+      var pill = document.getElementById('status-pill');
+      pill.textContent = 'Unknown';
+      pill.className = 'status-pill pill-unknown';
     }
   }
 
-  // Show failed state with retry
   p.btn.classList.remove('pending');
   p.btn.classList.add('failed');
   p.btn.disabled = false;
-  p.btn.innerHTML = '⚠ ' + reason + ' — tap to retry';
+  p.btn.innerHTML = reason + ' \u2014 retry';
   p.btn.onclick = function() {
     p.btn.classList.remove('failed');
     p.btn.innerHTML = p.originalText;
@@ -522,10 +671,9 @@ function confirmCommand() {
   p.btn.disabled = false;
   p.btn.innerHTML = p.originalText;
 
-  // Brief flash on status card to confirm
-  var card = document.getElementById('status-card');
-  card.classList.add('status-confirming');
-  setTimeout(function() { card.classList.remove('status-confirming'); }, 600);
+  var pill = document.getElementById('status-pill');
+  pill.classList.add('confirming');
+  setTimeout(function() { pill.classList.remove('confirming'); }, 600);
 }
 </script>
 </body>
