@@ -57,6 +57,9 @@
   .last-seen { margin-left: auto; font-size: 0.75rem; color: var(--text-muted); white-space: nowrap; }
   .last-seen.offline { color: #ef4444; }
 
+  .pill-ign-ok { background: var(--armed-bg); color: var(--armed-text); border: 1px solid var(--armed); }
+  .pill-ign-cut { background: var(--disarmed-bg); color: var(--disarmed-text); border: 1px solid var(--disarmed); }
+
   .status-pill.confirming { animation: pillPulse 0.6s ease-in-out; }
   @keyframes pillPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
@@ -92,6 +95,8 @@
   .btn-disarm { background: var(--disarmed); color: #fff; }
   .btn-gps { background: var(--accent); color: #fff; }
   .btn-photo { background: #7c3aed; color: #fff; }
+  .btn-immobilize { background: #dc2626; color: #fff; }
+  .btn-restore { background: #16a34a; color: #fff; }
 
   /* Optimistic UI */
   .action-bar button .spinner { display: inline-block; width: 0.85em; height: 0.85em; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 0.25rem; }
@@ -132,6 +137,15 @@
   #feed-list::-webkit-scrollbar-track { background: transparent; }
   #feed-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
+  /* Confirm Dialog */
+  .confirm-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 9000; }
+  .confirm-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; max-width: 340px; text-align: center; }
+  .confirm-card p { margin-bottom: 1rem; font-size: 0.9rem; line-height: 1.5; }
+  .confirm-btns { display: flex; gap: 0.5rem; }
+  .confirm-btns button { flex: 1; padding: 0.6rem; border: none; border-radius: var(--radius-sm); font-weight: 600; cursor: pointer; font-family: inherit; font-size: 0.85rem; }
+  .btn-confirm-yes { background: var(--disarmed); color: #fff; }
+  .btn-confirm-no { background: var(--border); color: var(--text); }
+
   /* Mobile */
   @media (max-width: 640px) {
     #dashboard { padding: 0.5rem; }
@@ -169,6 +183,7 @@
   <div class="dash-header">
     <h1>Anti-Theft Dashboard</h1>
     <span id="status-pill" class="status-pill pill-unknown">Unknown</span>
+    <span id="ignition-pill" class="status-pill pill-ign-ok">IGNITION OK</span>
     <span id="last-seen" class="last-seen"></span>
   </div>
 
@@ -196,12 +211,27 @@
       <button id="btn-gps" class="btn-gps" onclick="sendCommand('GPS', this)">GPS</button>
       <button id="btn-photo" class="btn-photo" onclick="sendCommand('PHOTO', this)">Photo</button>
     </div>
+    <div class="btn-group">
+      <button id="btn-immobilize" class="btn-immobilize" onclick="confirmImmobilize()">Immobilize</button>
+      <button id="btn-restore" class="btn-restore" onclick="confirmRestore()">Restore</button>
+    </div>
   </div>
 
   <div class="feed-section">
     <div class="feed-header">Events</div>
     <div id="feed-list">
       <div class="feed-empty">No events yet</div>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm Dialog -->
+<div id="confirm-dialog" class="confirm-overlay" style="display:none">
+  <div class="confirm-card">
+    <p id="confirm-text"></p>
+    <div class="confirm-btns">
+      <button id="confirm-yes" class="btn-confirm-yes">Confirm</button>
+      <button id="confirm-no" class="btn-confirm-no">Cancel</button>
     </div>
   </div>
 </div>
@@ -241,6 +271,7 @@ let gpsTrail = [];
 let trailLine = null;
 let lastMessageTime = null;
 let lastKnownStatus = null;
+let lastIgnitionState = false;
 let isOffline = false;
 const seenMsgIds = new Set();
 
@@ -256,6 +287,10 @@ function initDashboard() {
   var savedTime = localStorage.getItem('lastMessageTime');
   if (savedTime) lastMessageTime = parseInt(savedTime);
   if (lastKnownStatus) updateStatus(lastKnownStatus);
+
+  var savedIgnition = localStorage.getItem('lastIgnitionState');
+  if (savedIgnition === 'true') updateIgnition(true);
+  else updateIgnition(false);
 
   var savedGPS = localStorage.getItem('lastGPS');
   if (savedGPS) {
@@ -360,6 +395,16 @@ function handleNotification(msg, historical) {
     if (!historical && pendingCmd && pendingCmd.cmd === 'ARM') confirmCommand();
   }
 
+  // Ignition state detection
+  if (bodyLower.indexOf('immobilized') >= 0) {
+    updateIgnition(true);
+    if (!historical && pendingCmd && pendingCmd.cmd === 'IMMOBILIZE') confirmCommand();
+  }
+  if (bodyLower.indexOf('ignition restored') >= 0 || bodyLower.indexOf('ignition_ok') >= 0 || bodyLower.indexOf('ignition: ok') >= 0) {
+    updateIgnition(false);
+    if (!historical && pendingCmd && pendingCmd.cmd === 'RESTORE') confirmCommand();
+  }
+
   if (!historical) {
     if (pendingCmd && pendingCmd.cmd === 'GPS' && body.indexOf('Location:') >= 0) confirmCommand();
     if (pendingCmd && pendingCmd.cmd === 'PHOTO' && (attachment || body.indexOf('Photo') >= 0)) confirmCommand();
@@ -407,6 +452,19 @@ function updateStatus(status) {
   isOffline = false;
   document.getElementById('offline-banner').style.display = 'none';
   updateLastSeen();
+}
+
+function updateIgnition(immobilized) {
+  var pill = document.getElementById('ignition-pill');
+  if (immobilized) {
+    pill.textContent = 'IMMOBILIZED';
+    pill.className = 'status-pill pill-ign-cut';
+  } else {
+    pill.textContent = 'IGNITION OK';
+    pill.className = 'status-pill pill-ign-ok';
+  }
+  lastIgnitionState = immobilized;
+  localStorage.setItem('lastIgnitionState', immobilized ? 'true' : 'false');
 }
 
 function updateLastSeen() {
@@ -652,14 +710,15 @@ function showToast(message) {
 
 // --- Optimistic Command UI ---
 var pendingCmd = null;
-var BTN_LABELS = { ARM: 'Arm', DISARM: 'Disarm', GPS: 'GPS', PHOTO: 'Photo' };
-var BTN_PENDING = { ARM: 'Arming\u2026', DISARM: 'Disarming\u2026', GPS: 'Locating\u2026', PHOTO: 'Capturing\u2026' };
+var BTN_LABELS = { ARM: 'Arm', DISARM: 'Disarm', GPS: 'GPS', PHOTO: 'Photo', IMMOBILIZE: 'Immobilize', RESTORE: 'Restore' };
+var BTN_PENDING = { ARM: 'Arming\u2026', DISARM: 'Disarming\u2026', GPS: 'Locating\u2026', PHOTO: 'Capturing\u2026', IMMOBILIZE: 'Immobilizing\u2026', RESTORE: 'Restoring\u2026' };
 
 async function sendCommand(cmd, btn) {
   if (pendingCmd) return;
 
   var originalText = btn.innerHTML;
   var previousStatus = lastKnownStatus;
+  var previousIgnition = lastIgnitionState;
 
   btn.innerHTML = '<span class="spinner"></span>' + BTN_PENDING[cmd];
   btn.classList.add('pending');
@@ -667,8 +726,10 @@ async function sendCommand(cmd, btn) {
 
   if (cmd === 'ARM') updateStatus('ARMED');
   else if (cmd === 'DISARM') updateStatus('DISARMED');
+  else if (cmd === 'IMMOBILIZE') updateIgnition(true);
+  else if (cmd === 'RESTORE') updateIgnition(false);
 
-  pendingCmd = { cmd: cmd, btn: btn, originalText: originalText, previousStatus: previousStatus, timer: null };
+  pendingCmd = { cmd: cmd, btn: btn, originalText: originalText, previousStatus: previousStatus, previousIgnition: previousIgnition, timer: null };
 
   try {
     var resp = await fetch('https://ntfy.sh/' + CMD_TOPIC, { method: 'POST', body: cmd });
@@ -696,6 +757,9 @@ function markCommandFailed(reason) {
       pill.className = 'status-pill pill-unknown';
     }
   }
+  if (p.cmd === 'IMMOBILIZE' || p.cmd === 'RESTORE') {
+    updateIgnition(p.previousIgnition);
+  }
 
   p.btn.classList.remove('pending');
   p.btn.classList.add('failed');
@@ -722,6 +786,34 @@ function confirmCommand() {
   var pill = document.getElementById('status-pill');
   pill.classList.add('confirming');
   setTimeout(function() { pill.classList.remove('confirming'); }, 600);
+}
+
+// --- Two-step Confirm Dialog ---
+function showConfirmDialog(message, onConfirm) {
+  var dialog = document.getElementById('confirm-dialog');
+  document.getElementById('confirm-text').textContent = message;
+  dialog.style.display = 'flex';
+  document.getElementById('confirm-yes').onclick = function() {
+    dialog.style.display = 'none';
+    onConfirm();
+  };
+  document.getElementById('confirm-no').onclick = function() {
+    dialog.style.display = 'none';
+  };
+}
+
+function confirmImmobilize() {
+  if (pendingCmd) return;
+  showConfirmDialog("Are you sure? This will cut the vehicle's ignition.", function() {
+    sendCommand('IMMOBILIZE', document.getElementById('btn-immobilize'));
+  });
+}
+
+function confirmRestore() {
+  if (pendingCmd) return;
+  showConfirmDialog("Are you sure? This will restore the vehicle's ignition.", function() {
+    sendCommand('RESTORE', document.getElementById('btn-restore'));
+  });
 }
 </script>
 </body>
