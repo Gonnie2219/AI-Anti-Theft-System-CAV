@@ -365,10 +365,17 @@ function addFeedItem(title, body, priority, attachment) {
     const safeUrl = escapeHtml(attachment.url);
     html += '<div class="photo-wrap">';
     html += '<img src="' + safeUrl + '" alt="Photo" onclick="openLightbox(\'' + safeUrl + '\')">';
-    html += '<button class="btn-download" onclick="event.stopPropagation(); window.open(\'' + safeUrl + '\', \'_blank\')" title="Download">⬇</button>';
+    html += '<button class="btn-download" data-url="' + safeUrl + '" title="Download">⬇</button>';
     html += '</div>';
   }
   item.innerHTML = html;
+  var dlBtn = item.querySelector('.btn-download');
+  if (dlBtn) {
+    dlBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      window.open(this.getAttribute('data-url'), '_blank');
+    });
+  }
   list.insertBefore(item, list.firstChild);
   while (list.children.length > 50) list.removeChild(list.lastChild);
   return item;
