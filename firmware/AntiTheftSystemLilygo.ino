@@ -41,7 +41,7 @@ const char    OWNER_PHONE[]    = "+16093589220";
 #define USE_NATIVE_SMS      0          // 1 = SpeedTalk AT+CMGS, 0 = Twilio via ntfy
 
 #define IMG_BUF_SIZE        51200      // 50 KB photo buffer
-#define HEARTBEAT_MS    21600000UL     // 6 hours
+#define HEARTBEAT_MS      300000UL     // 5 minutes
 #define GPS_UPDATE_MS     300000UL     // 5 minutes
 #define NTFY_CMD_TOPIC   "antitheft-gonnie-2219-cmd"
 #define NTFY_CMD_POLL_MS    5000UL     // 5 seconds

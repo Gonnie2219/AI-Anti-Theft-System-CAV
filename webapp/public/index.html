@@ -284,7 +284,7 @@ function updateStatus(status) {
 function checkOfflineStatus() {
   if (!lastMessageTime) return;
   const elapsed = Date.now() - lastMessageTime;
-  if (elapsed > 180000) {
+  if (elapsed > 900000) { // 15 min — matches 5-min heartbeat with margin
     isOffline = true;
     const card = document.getElementById('status-card');
     card.textContent = 'SYSTEM OFFLINE';
