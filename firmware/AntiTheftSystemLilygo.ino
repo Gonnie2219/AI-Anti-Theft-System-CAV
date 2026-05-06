@@ -518,6 +518,10 @@ void handleSMSCommand(String cmd) {
     SerialMain.println("SMS_CMD:STATUS");
   } else if (cmd == "PHOTO") {
     SerialMain.println("SMS_CMD:PHOTO");
+  } else if (cmd == "IMMOBILIZE") {
+    SerialMain.println("SMS_CMD:IMMOBILIZE");
+  } else if (cmd == "RESTORE") {
+    SerialMain.println("SMS_CMD:RESTORE");
   } else if (cmd == "GPS") {
     updateGPS();
     String gpsReply = gpsLat.length() > 0
@@ -526,7 +530,7 @@ void handleSMSCommand(String cmd) {
     httpPostText(NTFY_TOPIC, "Title: Command Reply\r\nPriority: default\r\nTags: speech_balloon", gpsReply);
   } else if (cmd == "HELP") {
     httpPostText(NTFY_TOPIC, "Title: Command Reply\r\nPriority: default\r\nTags: speech_balloon",
-                 "Commands: ARM DISARM STATUS PHOTO GPS HELP");
+                 "Commands: ARM DISARM STATUS PHOTO GPS IMMOBILIZE RESTORE HELP");
   }
   // Unknown commands silently dropped (Worker already validated)
 }
