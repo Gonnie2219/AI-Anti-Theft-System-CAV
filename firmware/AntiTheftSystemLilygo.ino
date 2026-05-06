@@ -700,11 +700,14 @@ void setup() {
 
   // Set APN with IPv4 PDP type. Hologram provides native IPv4.
   // Radio cycle (CFUN=0/1) forces re-attach with the new profile.
-  sendAT("AT+CFUN=0", "OK", 10000);
+  String cfun0 = sendAT("AT+CFUN=0", "OK", 10000);
+  if (cfun0.indexOf("OK") < 0) SerialMon.println("[SETUP] CFUN=0 failed: " + cfun0);
   delay(2000);
-  sendAT("AT+CGDCONT=1,\"IP\",\"" + String(APN) + "\"", "OK", 3000);
+  String apnR = sendAT("AT+CGDCONT=1,\"IP\",\"" + String(APN) + "\"", "OK", 3000);
+  if (apnR.indexOf("OK") < 0) SerialMon.println("[SETUP] APN config failed: " + apnR);
   sendAT("AT+CGAUTH=1,0,\"\",\"\"", "OK", 3000);
-  sendAT("AT+CFUN=1", "OK", 15000);
+  String cfun1 = sendAT("AT+CFUN=1", "OK", 15000);
+  if (cfun1.indexOf("OK") < 0) SerialMon.println("[SETUP] CFUN=1 failed: " + cfun1);
   delay(3000);
 
   // Wait for data registration
@@ -723,10 +726,12 @@ void setup() {
 
   // Force packet-switched attach (CGREG=1 only confirms registration,
   // not actual data attach. CGATT=1 is the explicit "give me data" command).
-  sendAT("AT+CGATT=1", "OK", 10000);
+  String cgatt = sendAT("AT+CGATT=1", "OK", 10000);
+  if (cgatt.indexOf("OK") < 0) SerialMon.println("[SETUP] PS attach failed: " + cgatt);
 
   // Activate PDP context (HTTPINIT will use whichever cid is active)
-  sendAT("AT+CGACT=1,1", "OK", 10000);
+  String cgact = sendAT("AT+CGACT=1,1", "OK", 10000);
+  if (cgact.indexOf("OK") < 0) SerialMon.println("[SETUP] PDP activate failed: " + cgact);
 
   // Log diagnostic info: PDP profile, addresses (v4 and v6 if dual-stack
   // worked), full context profile with DNS. Together these tell us
