@@ -212,7 +212,7 @@ void startAlarm(String reason) {
 
   // Launch alarm task on Core 0 with 16KB stack
   char* reasonCopy = strdup(reason.c_str());
-  xTaskCreatePinnedToCore(
+  BaseType_t rc = xTaskCreatePinnedToCore(
     alarmTask,       // function
     "AlarmTask",     // name
     16384,           // stack size (16KB — heavy String usage)
@@ -221,6 +221,11 @@ void startAlarm(String reason) {
     NULL,            // task handle
     0                // Core 0
   );
+  if (rc != pdPASS) {
+    Serial.println("AlarmTask creation failed!");
+    free(reasonCopy);
+    alarmInProgress = false;
+  }
 }
 
 // ── Alarm Task (Core 0) — Runs in background ────────────────
