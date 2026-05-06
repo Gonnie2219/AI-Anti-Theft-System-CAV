@@ -56,6 +56,11 @@ function parseDedup(raw) {
 }
 
 async function handleCron(env) {
+  try { return await _handleCron(env); }
+  catch (err) { console.error("Cron handler error:", err); }
+}
+
+async function _handleCron(env) {
   const messages = await pollNtfy(env);
   if (messages.length === 0) return;
 
