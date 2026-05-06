@@ -269,7 +269,7 @@ function handleNotification(msg) {
   }
 
   // Send email for intrusion alerts only (skip if this message was our own email forward)
-  if ((title === 'Anti-Theft ALERT' || priority >= 5) && tags.indexOf('email-forwarded') < 0) {
+  if ((title.toLowerCase().startsWith('anti-theft alert') || priority >= 5) && tags.indexOf('email-forwarded') < 0) {
     sendEmailAlert(title, body, feedItem);
   }
 }

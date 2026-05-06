@@ -1,15 +1,24 @@
 /**
- * Cloudflare Worker: ntfy.sh → WhatsApp Bridge
+ * Cloudflare Worker: ntfy.sh → WhatsApp + SMS Bridge
  *
- * Polls ntfy.sh for anti-theft alerts and forwards them to WhatsApp via Twilio.
+ * Polls ntfy.sh for anti-theft alerts and forwards them to WhatsApp + SMS
+ * via Twilio.  Also accepts inbound SMS webhooks from Twilio and posts
+ * commands to the ntfy command topic for the LILYGO to pick up.
+ *
  * Deployed with cron trigger (every minute).
  *
  * Required secrets (set via `wrangler secret put`):
- *   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM, TWILIO_TO, NTFY_TOPIC,
- *   ANALYZE_URL (Vercel /api/analyze endpoint)
+ *   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN,
+ *   TWILIO_FROM, TWILIO_TO          — WhatsApp (whatsapp:+… prefix)
+ *   TWILIO_SMS_FROM, TWILIO_SMS_TO  — SMS (plain +1… numbers)
+ *   NTFY_TOPIC, ANALYZE_URL (Vercel /api/analyze endpoint)
  *
  * KV namespace binding: ANTITHEFT_STATE
  */
+
+const VALID_COMMANDS = ["ARM", "DISARM", "STATUS", "PHOTO", "GPS", "HELP"];
+const OWNER_LAST10 = "6093589220";
+const NTFY_CMD_TOPIC = "antitheft-gonnie-2219-cmd";
 
 export default {
   async scheduled(event, env, ctx) {
@@ -17,29 +26,75 @@ export default {
   },
 
   async fetch(request, env) {
+    const url = new URL(request.url);
+
+    // Inbound SMS webhook from Twilio
+    if (request.method === "POST" && url.pathname === "/sms/inbound") {
+      return handleInboundSMS(request, env);
+    }
+
+    // Health check
     const lastPoll = await env.ANTITHEFT_STATE.get("last_poll_timestamp");
     return Response.json({
       status: "ok",
-      worker: "antitheft-whatsapp-bridge",
+      worker: "antitheft-whatsapp-sms-bridge",
       last_poll_timestamp: lastPoll || "never",
     });
   },
 };
 
+// Parse dedup value: handles legacy "1" and new JSON format
+function parseDedup(raw) {
+  if (!raw) return { whatsapp: false, sms: false };
+  if (raw === "1") return { whatsapp: true, sms: true }; // legacy: fully delivered
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { whatsapp: false, sms: false };
+  }
+}
+
 async function handleCron(env) {
   const messages = await pollNtfy(env);
   if (messages.length === 0) return;
 
-  // Separate into alerts and photos
-  const alerts = messages.filter((m) => m.title.startsWith("Anti-Theft ALERT"));
-  const photos = messages.filter((m) => m.title === "Photo Evidence");
+  // Advance cursor past all fetched messages regardless of categorization
+  const latestTime = Math.max(...messages.map((m) => m.time));
+  await env.ANTITHEFT_STATE.put("last_poll_timestamp", String(latestTime));
 
-  console.log(`Found ${alerts.length} alert(s), ${photos.length} photo(s)`);
+  // Only forward messages from the last 5 minutes to avoid backlog floods
+  const freshCutoff = Math.floor(Date.now() / 1000) - 300;
+  const fresh = messages.filter((m) => m.time >= freshCutoff);
+  if (fresh.length === 0) return;
 
+  // Separate into alerts, photos, and command replies
+  const alerts = fresh.filter(
+    (m) => typeof m.message === "string" && m.message.startsWith("ALERT:")
+  );
+
+  const photos = fresh.filter(
+    (m) =>
+      m.attachment &&
+      m.attachment.url &&
+      m.attachment.name &&
+      /\.jpe?g$/i.test(m.attachment.name)
+  );
+
+  const replies = fresh.filter(
+    (m) =>
+      typeof m.message === "string" &&
+      (m.message.startsWith("SMS_REPLY:") ||
+        m.message.startsWith("Command Reply"))
+  );
+
+  console.log(`Found ${alerts.length} alert(s), ${photos.length} photo(s), ${replies.length} reply(s)`);
+
+  // --- Process alerts (WhatsApp + SMS) ---
   for (const alert of alerts) {
     const dedupKey = `msg:${alert.id}`;
-    if (await env.ANTITHEFT_STATE.get(dedupKey)) {
-      console.log(`Skipping duplicate: ${alert.id}`);
+    const dedup = parseDedup(await env.ANTITHEFT_STATE.get(dedupKey));
+    if (dedup.whatsapp && dedup.sms) {
+      console.log(`Skipping fully delivered: ${alert.id}`);
       continue;
     }
 
@@ -59,37 +114,75 @@ async function handleCron(env) {
       aiVerdict = await analyzePhoto(env.ANALYZE_URL, mediaUrl);
     }
 
-    const message = formatWhatsAppMessage(alert, aiVerdict);
-    const success = await sendWhatsApp(env, message, mediaUrl);
-
-    if (!success) {
-      console.error(`Failed to send alert ${alert.id}, stopping batch`);
-      return;
+    // WhatsApp
+    if (!dedup.whatsapp) {
+      const message = formatWhatsAppMessage(alert, aiVerdict);
+      if (await sendWhatsApp(env, message, mediaUrl)) {
+        dedup.whatsapp = true;
+      } else {
+        console.error(`WhatsApp failed for ${alert.id}`);
+      }
     }
 
-    await env.ANTITHEFT_STATE.put(dedupKey, "1", { expirationTtl: 86400 });
+    // SMS
+    if (!dedup.sms) {
+      const smsBody = formatSMSMessage(alert);
+      if (await sendSMS(env, smsBody)) {
+        dedup.sms = true;
+      } else {
+        console.error(`SMS failed for ${alert.id}`);
+      }
+    }
+
+    await env.ANTITHEFT_STATE.put(dedupKey, JSON.stringify(dedup), {
+      expirationTtl: 86400,
+    });
     if (matchedPhoto) {
-      await env.ANTITHEFT_STATE.put(`msg:${matchedPhoto.id}`, "1", {
-        expirationTtl: 86400,
-      });
+      await env.ANTITHEFT_STATE.put(
+        `msg:${matchedPhoto.id}`,
+        JSON.stringify({ whatsapp: true, sms: true }),
+        { expirationTtl: 86400 }
+      );
       console.log(`Forwarded alert ${alert.id} with photo ${matchedPhoto.id}`);
     } else {
-      console.log(`Forwarded alert ${alert.id} (no photo matched)`);
+      console.log(`Forwarded alert ${alert.id} (wa:${dedup.whatsapp} sms:${dedup.sms})`);
     }
+  }
+
+  // --- Process command replies (SMS only) ---
+  for (const reply of replies) {
+    const dedupKey = `msg:${reply.id}`;
+    const dedup = parseDedup(await env.ANTITHEFT_STATE.get(dedupKey));
+    if (dedup.sms) {
+      console.log(`Skipping delivered reply: ${reply.id}`);
+      continue;
+    }
+
+    const body = reply.message || "(no response)";
+    if (await sendSMS(env, body)) {
+      dedup.sms = true;
+      dedup.whatsapp = true; // not applicable for replies
+    } else {
+      console.error(`SMS failed for reply ${reply.id}`);
+    }
+    await env.ANTITHEFT_STATE.put(dedupKey, JSON.stringify(dedup), {
+      expirationTtl: 86400,
+    });
+    console.log(`Reply ${reply.id}: sms=${dedup.sms}`);
   }
 
   // Mark orphan photos as consumed so they don't pile up
   for (const photo of photos) {
     const dedupKey = `msg:${photo.id}`;
     if (!(await env.ANTITHEFT_STATE.get(dedupKey))) {
-      await env.ANTITHEFT_STATE.put(dedupKey, "1", { expirationTtl: 86400 });
+      await env.ANTITHEFT_STATE.put(
+        dedupKey,
+        JSON.stringify({ whatsapp: true, sms: true }),
+        { expirationTtl: 86400 }
+      );
       console.log(`Consumed orphan photo ${photo.id}`);
     }
   }
-
-  // Advance cursor past all processed messages
-  const latestTime = Math.max(...messages.map((m) => m.time));
-  await env.ANTITHEFT_STATE.put("last_poll_timestamp", String(latestTime));
 }
 
 async function pollNtfy(env) {
@@ -121,14 +214,7 @@ async function pollNtfy(env) {
     })
     .filter(Boolean);
 
-  // Filter: alerts and photo evidence messages
-  return messages.filter(
-    (msg) =>
-      msg.event === "message" &&
-      msg.title &&
-      (msg.title.startsWith("Anti-Theft ALERT") ||
-        msg.title === "Photo Evidence")
-  );
+  return messages.filter((msg) => msg.event === "message");
 }
 
 async function sendWhatsApp(env, message, mediaUrl) {
@@ -194,7 +280,7 @@ function formatWhatsAppMessage(alert, aiVerdict) {
   let mapsUrl = "";
 
   for (const line of lines) {
-    const alertMatch = line.match(/\*\*ALERT:\*\*\s*(.+)/);
+    const alertMatch = line.match(/^ALERT:\s*(.+)/);
     if (alertMatch) {
       reason = alertMatch[1].trim();
     }
@@ -204,7 +290,7 @@ function formatWhatsAppMessage(alert, aiVerdict) {
       location = locMatch[1];
     }
 
-    const urlMatch = line.match(/\[View Location on Google Maps\]\((https:\/\/[^)]+)\)/);
+    const urlMatch = line.match(/(https:\/\/maps\.google\.com\/[^\s]+)/);
     if (urlMatch) {
       mapsUrl = urlMatch[1];
     }
@@ -224,4 +310,136 @@ function formatWhatsAppMessage(alert, aiVerdict) {
 
   // Keep under 600 chars (expanded for AI verdict)
   return msg.slice(0, 600);
+}
+
+function formatSMSMessage(alert) {
+  const body = alert.message || "";
+  const lines = body.split("\n");
+
+  let reason = "Unknown";
+  let mapsUrl = "";
+
+  for (const line of lines) {
+    const alertMatch = line.match(/ALERT:\s*(.+)/);
+    if (alertMatch) reason = alertMatch[1].trim();
+
+    const urlMatch = line.match(/(https:\/\/maps\.google\.com\/[^\s)]+)/);
+    if (urlMatch) mapsUrl = urlMatch[1];
+  }
+
+  let msg = `ALERT: ${reason}`;
+  if (mapsUrl) msg += `\n${mapsUrl}`;
+  return msg.slice(0, 160);
+}
+
+// ── Outbound SMS via Twilio ──────────────────────────────────
+async function sendSMS(env, message) {
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`;
+  const auth = btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`);
+
+  const body = new URLSearchParams({
+    To: env.TWILIO_SMS_TO,
+    From: env.TWILIO_SMS_FROM,
+    Body: message,
+  });
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: body.toString(),
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    console.error(`Twilio SMS error ${resp.status}: ${err}`);
+    return false;
+  }
+  return true;
+}
+
+// ── Inbound SMS webhook from Twilio ──────────────────────────
+async function handleInboundSMS(request, env) {
+  // Parse form body
+  const formData = await request.formData();
+  const params = Object.fromEntries(formData);
+
+  // Validate Twilio signature (HMAC-SHA1)
+  const signature = request.headers.get("X-Twilio-Signature") || "";
+  const requestUrl = new URL(request.url);
+  // Twilio signs against the full URL as configured in the webhook
+  const signUrl = requestUrl.origin + requestUrl.pathname;
+
+  const isValid = await verifyTwilioSignature(
+    env.TWILIO_AUTH_TOKEN,
+    signUrl,
+    params,
+    signature
+  );
+  if (!isValid) {
+    console.error("Invalid Twilio signature");
+    return new Response("Forbidden", { status: 403 });
+  }
+
+  // Sender whitelist — compare last 10 digits
+  const from = (params.From || "").replace(/[\s\-+]/g, "");
+  const fromLast10 = from.slice(-10);
+  if (fromLast10 !== OWNER_LAST10) {
+    console.error(`Rejected SMS from ${params.From}`);
+    return new Response("Forbidden", { status: 403 });
+  }
+
+  // Parse command
+  const rawBody = (params.Body || "").trim().toUpperCase();
+  if (!VALID_COMMANDS.includes(rawBody)) {
+    return twiml(`Unknown command. Valid: ${VALID_COMMANDS.join(" ")}`);
+  }
+
+  // Post command to ntfy command topic
+  const ntfyResp = await fetch(`https://ntfy.sh/${NTFY_CMD_TOPIC}`, {
+    method: "POST",
+    body: rawBody,
+  });
+  if (!ntfyResp.ok) {
+    console.error(`ntfy cmd post failed: ${ntfyResp.status}`);
+    return twiml("Error queuing command. Try again.");
+  }
+
+  return twiml(`Command queued: ${rawBody}`);
+}
+
+function twiml(message) {
+  const xml = `<Response><Message>${escapeXml(message)}</Message></Response>`;
+  return new Response(xml, {
+    headers: { "Content-Type": "text/xml" },
+  });
+}
+
+function escapeXml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+async function verifyTwilioSignature(authToken, url, params, expected) {
+  // Build the data string: URL + sorted param keys with values concatenated
+  const sortedKeys = Object.keys(params).sort();
+  let data = url;
+  for (const key of sortedKeys) {
+    data += key + params[key];
+  }
+
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(authToken),
+    { name: "HMAC", hash: "SHA-1" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(data));
+
+  // Base64 encode
+  const computed = btoa(String.fromCharCode(...new Uint8Array(sig)));
+  return computed === expected;
 }
