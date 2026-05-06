@@ -100,6 +100,12 @@ String sendAT(String cmd, String expect, unsigned long timeout) {
 // CIPOPEN. Each request goes: HTTPTERM (cleanup) -> HTTPINIT ->
 // HTTPPARA (URL/content/headers) -> HTTPDATA (upload body) ->
 // HTTPACTION (execute) -> wait for +HTTPACTION URC -> HTTPTERM.
+//
+// NOTE: We use HTTP, not HTTPS. The SIM7600 supports AT+HTTPSSL=1
+// but in practice it fails TLS handshakes with ntfy.sh (certificate
+// chain issues, modem firmware limitations). Alert content and GPS
+// coordinates are sent in cleartext. Accepted trade-off for now —
+// the ntfy topic name provides obscurity, not security.
 
 static int waitHttpAction(unsigned long timeout) {
   unsigned long start = millis();
