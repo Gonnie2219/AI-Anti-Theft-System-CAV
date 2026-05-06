@@ -29,7 +29,7 @@
 #define CAM_RX          16
 #define LILYGO_TX       27
 #define LILYGO_RX       26
-#define IMMOBILIZE_PIN  22
+#define IMMOBILIZE_PIN  23
 
 // Status LEDs
 #define LED_GREEN       32
