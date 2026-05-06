@@ -530,7 +530,8 @@ bool receiveImage() {
 //  Notifications
 // ─────────────────────────────────────────────────────────────
 void handleAlert(String reason) {
-  SerialMon.println("\n[ALERT] " + reason);
+  bool isPhotoRequest = (reason == "Photo Requested");
+  SerialMon.println(isPhotoRequest ? "\n[PHOTO_REQ]" : "\n[ALERT] " + reason);
   digitalWrite(LED_PIN, HIGH);
 
   // 1) Receive image from Main if it sends one. Must come FIRST so that
@@ -542,26 +543,37 @@ void handleAlert(String reason) {
 
 #if USE_NATIVE_SMS
   // 3) SMS first — it's the fastest and most reliable notification channel.
-  String smsBody = "ALERT: " + reason;
-  if (gpsMapsLink.length() > 0) smsBody += "\n" + gpsMapsLink;
-  sendSMS(OWNER_PHONE, smsBody);
+  //    Skip SMS for user-initiated photo requests.
+  if (!isPhotoRequest) {
+    String smsBody = "ALERT: " + reason;
+    if (gpsMapsLink.length() > 0) smsBody += "\n" + gpsMapsLink;
+    sendSMS(OWNER_PHONE, smsBody);
+  }
 #endif
 
-  // 4) ntfy text alert (Worker forwards to WhatsApp + SMS via Twilio)
-  String body = "ALERT: " + reason;
+  // 4) ntfy text notification (real alerts forwarded to WhatsApp by Worker)
+  String body, headers;
+  if (isPhotoRequest) {
+    body = "Photo captured on request";
+    headers = "Title: Photo Capture\r\nPriority: low\r\nTags: camera";
+  } else {
+    body = "ALERT: " + reason;
+    headers = "Title: Anti-Theft Alert\r\nPriority: urgent\r\nTags: rotating_light";
+    if (gpsMapsLink.length() > 0) headers += "\r\nClick: " + gpsMapsLink;
+  }
   String ts = getModemTime();
   if (ts.length() > 0)         body += "\nTime: " + ts;
   if (gpsLat.length() == 0)
-    SerialMon.println("[GPS] GPS not yet acquired - alert sent without location");
+    SerialMon.println("[GPS] GPS not yet acquired - sent without location");
   if (gpsLat.length() > 0)     body += "\nLocation: " + gpsLat + "," + gpsLon + "\n" + gpsMapsLink;
 
-  String headers = "Title: Anti-Theft Alert\r\nPriority: urgent\r\nTags: rotating_light";
-  if (gpsMapsLink.length() > 0) headers += "\r\nClick: " + gpsMapsLink;
   bool ntfyOk = httpPostText(NTFY_TOPIC, headers, body);
 
   // 5) ntfy photo (if we have one)
   if (hasImage && imgSize > 0) {
-    String imgHdrs = "Title: Photo Evidence\r\nFilename: alert.jpg";
+    String imgHdrs = isPhotoRequest
+      ? "Title: Requested Photo\r\nFilename: photo.jpg"
+      : "Title: Photo Evidence\r\nFilename: alert.jpg";
     httpPostBinary(NTFY_TOPIC, imgHdrs, imgBuffer, imgSize);
   }
 
@@ -569,7 +581,7 @@ void handleAlert(String reason) {
   SerialMain.println(ntfyOk ? "LILYGO_OK: notified" : "LILYGO_ERROR");
 
   digitalWrite(LED_PIN, LOW);
-  SerialMon.println("[ALERT] complete\n");
+  SerialMon.println(isPhotoRequest ? "[PHOTO_REQ] complete\n" : "[ALERT] complete\n");
 }
 
 void handleStatus(String status) {
