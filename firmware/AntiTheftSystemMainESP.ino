@@ -1,7 +1,7 @@
 /*
  * ANTI-THEFT SYSTEM — Main ESP32
  * Central coordinator: reads sensors, buffers photo from CAM, forwards to LILYGO.
- * Handles SMS commands (ARM, DISARM, STATUS, PHOTO) forwarded from LILYGO.
+ * Handles SMS commands (ARM, DISARM, STATUS, PHOTO, IMMOBILIZE, RESTORE) forwarded from LILYGO.
  * Board: ESP32 Dev Module
  *
  * Core 1 (main loop): RF remote, sensors, LED control — always responsive.
@@ -20,6 +20,7 @@
  */
 
 #include <RCSwitch.h>
+#include <Preferences.h>
 
 #define VIBRATION_PIN   13
 #define REED_PIN        14
@@ -28,6 +29,7 @@
 #define CAM_RX          16
 #define LILYGO_TX       27
 #define LILYGO_RX       26
+#define IMMOBILIZE_PIN  22
 
 // Status LEDs
 #define LED_GREEN       32
@@ -38,6 +40,9 @@ RCSwitch mySwitch = RCSwitch();
 #define CODE_DISARM     616610
 
 volatile bool armed = false;
+bool immobilized = false;
+Preferences preferences;
+
 bool lastVibration = LOW;
 bool lastReed = LOW;
 unsigned long lastAlarmTime = 0;
@@ -82,6 +87,13 @@ void setup() {
   pinMode(LED_RED, OUTPUT);
   digitalWrite(LED_GREEN, LOW);
   digitalWrite(LED_RED, HIGH);
+
+  // Immobilization relay — persisted via NVS so state survives reboot
+  preferences.begin("antitheft", false);
+  immobilized = preferences.getBool("immobilized", false);
+  pinMode(IMMOBILIZE_PIN, OUTPUT);
+  digitalWrite(IMMOBILIZE_PIN, immobilized ? LOW : HIGH);
+  Serial.println(immobilized ? "Ignition: IMMOBILIZED (relay off)" : "Ignition: OK (relay on)");
 
   Serial2.setRxBufferSize(2048);
   Serial2.begin(115200, SERIAL_8N1, CAM_RX, CAM_TX);
@@ -369,6 +381,7 @@ void handleSMSCommand(String cmd) {
   } else if (cmd == "STATUS") {
     String status = armed ? "ARMED" : "DISARMED";
     String reply = "Status: " + status;
+    reply += "\nIgnition: " + String(immobilized ? "IMMOBILIZED" : "OK");
     if (lastAlarmTime > 0) {
       unsigned long ago = (millis() - lastAlarmTime) / 1000;
       if (ago < 60)        reply += "\nLast alarm: " + String(ago) + "s ago";
@@ -381,5 +394,27 @@ void handleSMSCommand(String cmd) {
   } else if (cmd == "PHOTO") {
     SerialLilyGO.println("SMS_REPLY:Capturing photo...");
     startAlarm("Photo Requested");
+  } else if (cmd == "IMMOBILIZE") {
+    if (!immobilized) {
+      immobilized = true;
+      digitalWrite(IMMOBILIZE_PIN, LOW);
+      preferences.putBool("immobilized", true);
+      Serial.println("Ignition immobilized via command");
+      SerialLilyGO.println("SMS_REPLY:Ignition immobilized");
+      SerialLilyGO.println("STATUS:IMMOBILIZED");
+    } else {
+      SerialLilyGO.println("SMS_REPLY:Already immobilized");
+    }
+  } else if (cmd == "RESTORE") {
+    if (immobilized) {
+      immobilized = false;
+      digitalWrite(IMMOBILIZE_PIN, HIGH);
+      preferences.putBool("immobilized", false);
+      Serial.println("Ignition restored via command");
+      SerialLilyGO.println("SMS_REPLY:Ignition restored");
+      SerialLilyGO.println("STATUS:IGNITION_OK");
+    } else {
+      SerialLilyGO.println("SMS_REPLY:Already restored");
+    }
   }
 }
