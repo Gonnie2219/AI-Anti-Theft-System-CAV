@@ -44,7 +44,7 @@ const char    OWNER_PHONE[]    = "+16093589220";
 #define HEARTBEAT_MS    21600000UL     // 6 hours
 #define GPS_UPDATE_MS     300000UL     // 5 minutes
 #define NTFY_CMD_TOPIC   "antitheft-gonnie-2219-cmd"
-#define NTFY_CMD_POLL_MS   15000UL     // 15 seconds
+#define NTFY_CMD_POLL_MS    5000UL     // 5 seconds
 
 #if USE_NATIVE_SMS
 #define SMS_POLL_MS        60000UL     // safety-net SMS poll
@@ -842,6 +842,7 @@ void loop() {
 
   // 3) Poll ntfy command topic (Twilio SMS → Worker → ntfy → here)
   if (now - lastCmdPoll > NTFY_CMD_POLL_MS) {
+    SerialMon.println("[CMD] poll (every " + String(NTFY_CMD_POLL_MS / 1000) + "s)");
     pollNtfyCommands();
     lastCmdPoll = now;
   }
