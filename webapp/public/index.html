@@ -270,7 +270,7 @@ function handleNotification(msg) {
 
   // Send email for intrusion alerts only (skip if this message was our own email forward)
   if ((title.toLowerCase().startsWith('anti-theft alert') || priority >= 5 || body.startsWith('ALERT:')) && tags.indexOf('email-forwarded') < 0) {
-    sendEmailAlert(title, body, feedItem);
+    sendEmailAlert(title, body, feedItem, msg.id);
   }
 }
 
@@ -379,7 +379,13 @@ function escapeHtml(text) {
 }
 
 // --- Email Alert via ntfy.sh Email header ---
-async function sendEmailAlert(title, body, feedItem) {
+async function sendEmailAlert(title, body, feedItem, msgId) {
+  // Dedup across tabs using localStorage
+  if (msgId) {
+    const dedupKey = 'email_sent:' + msgId;
+    if (localStorage.getItem(dedupKey)) return;
+    localStorage.setItem(dedupKey, String(Date.now()));
+  }
   try {
     const resp = await fetch('https://ntfy.sh/' + ALERT_TOPIC, {
       method: 'POST',
