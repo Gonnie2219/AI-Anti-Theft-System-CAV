@@ -278,25 +278,49 @@ function initDashboard() {
   checkOfflineStatus();
   updateLastSeen();
 
-  const evtSource = new EventSource('https://ntfy.sh/' + ALERT_TOPIC + '/sse');
-  evtSource.addEventListener('message', function(e) {
-    try {
-      const msg = JSON.parse(e.data);
-      if (msg.event !== 'message') return;
-      handleNotification(msg);
-    } catch (err) { /* ignore non-JSON */ }
+  // Load recent history from ntfy, then open SSE for live updates
+  loadHistory().then(function() {
+    checkOfflineStatus();
+    updateLastSeen();
+
+    var evtSource = new EventSource('https://ntfy.sh/' + ALERT_TOPIC + '/sse');
+    evtSource.addEventListener('message', function(e) {
+      try {
+        var msg = JSON.parse(e.data);
+        if (msg.event !== 'message') return;
+        handleNotification(msg);
+      } catch (err) { /* ignore non-JSON */ }
+    });
+    evtSource.onerror = function() { showToast('Connection lost \u2014 reconnecting\u2026'); };
+    evtSource.onopen = function() {
+      showToast('Connected');
+      if (lastKnownStatus && !isOffline) updateStatus(lastKnownStatus);
+    };
   });
-  evtSource.onerror = function() { showToast('Connection lost — reconnecting…'); };
-  evtSource.onopen = function() {
-    showToast('Connected');
-    if (lastKnownStatus && !isOffline) updateStatus(lastKnownStatus);
-  };
 
   setInterval(checkOfflineStatus, 30000);
   setInterval(updateLastSeen, 30000);
 }
 
-function handleNotification(msg) {
+async function loadHistory() {
+  try {
+    var resp = await fetch('https://ntfy.sh/' + ALERT_TOPIC + '/json?poll=1&since=24h');
+    if (!resp.ok) return;
+    var text = await resp.text();
+    var lines = text.trim().split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      try {
+        var msg = JSON.parse(lines[i]);
+        if (msg.event !== 'message') continue;
+        handleNotification(msg, true);
+      } catch(e) {}
+    }
+  } catch(e) {
+    console.error('[History]', e);
+  }
+}
+
+function handleNotification(msg, historical) {
   if (msg.id) {
     if (seenMsgIds.has(msg.id)) return;
     seenMsgIds.add(msg.id);
@@ -306,10 +330,18 @@ function handleNotification(msg) {
     }
   }
 
-  lastMessageTime = Date.now();
-  localStorage.setItem('lastMessageTime', lastMessageTime);
+  if (historical && msg.time) {
+    var msgTime = msg.time * 1000;
+    if (!lastMessageTime || msgTime > lastMessageTime) {
+      lastMessageTime = msgTime;
+      localStorage.setItem('lastMessageTime', lastMessageTime);
+    }
+  } else if (!historical) {
+    lastMessageTime = Date.now();
+    localStorage.setItem('lastMessageTime', lastMessageTime);
+  }
 
-  if (isOffline && lastKnownStatus) {
+  if (!historical && isOffline && lastKnownStatus) {
     updateStatus(lastKnownStatus);
   }
 
@@ -322,14 +354,16 @@ function handleNotification(msg) {
   var bodyLower = body.toLowerCase();
   if (bodyLower.indexOf('disarmed') >= 0) {
     updateStatus('DISARMED');
-    if (pendingCmd && pendingCmd.cmd === 'DISARM') confirmCommand();
+    if (!historical && pendingCmd && pendingCmd.cmd === 'DISARM') confirmCommand();
   } else if (bodyLower.indexOf('armed') >= 0) {
     updateStatus('ARMED');
-    if (pendingCmd && pendingCmd.cmd === 'ARM') confirmCommand();
+    if (!historical && pendingCmd && pendingCmd.cmd === 'ARM') confirmCommand();
   }
 
-  if (pendingCmd && pendingCmd.cmd === 'GPS' && body.indexOf('Location:') >= 0) confirmCommand();
-  if (pendingCmd && pendingCmd.cmd === 'PHOTO' && (attachment || body.indexOf('Photo') >= 0)) confirmCommand();
+  if (!historical) {
+    if (pendingCmd && pendingCmd.cmd === 'GPS' && body.indexOf('Location:') >= 0) confirmCommand();
+    if (pendingCmd && pendingCmd.cmd === 'PHOTO' && (attachment || body.indexOf('Photo') >= 0)) confirmCommand();
+  }
 
   const locMatch = body.match(/Location:\s*([-\d.]+),([-\d.]+)/);
   if (locMatch) {
@@ -340,18 +374,21 @@ function handleNotification(msg) {
     }
   }
 
-  const feedItem = addFeedItem(title, body, priority, attachment);
+  var feedTs = (historical && msg.time) ? msg.time * 1000 : null;
+  const feedItem = addFeedItem(title, body, priority, attachment, feedTs);
 
   if (attachment && attachment.url) {
-    showHeroPhoto(attachment.url, title, body);
+    showHeroPhoto(attachment.url, title, body, historical ? feedTs : null);
   }
 
-  if (attachment && attachment.url && attachment.name && /\.jpe?g$/i.test(attachment.name)) {
-    analyzePhoto(attachment.url, feedItem);
-  }
+  if (!historical) {
+    if (attachment && attachment.url && attachment.name && /\.jpe?g$/i.test(attachment.name)) {
+      analyzePhoto(attachment.url, feedItem);
+    }
 
-  if ((title.toLowerCase().startsWith('anti-theft alert') || priority >= 5 || body.startsWith('ALERT:')) && tags.indexOf('email-forwarded') < 0) {
-    sendEmailAlert(title, body, feedItem, msg.id);
+    if ((title.toLowerCase().startsWith('anti-theft alert') || priority >= 5 || body.startsWith('ALERT:')) && tags.indexOf('email-forwarded') < 0) {
+      sendEmailAlert(title, body, feedItem, msg.id);
+    }
   }
 }
 
@@ -441,16 +478,19 @@ function updateMapPosition(lat, lon) {
   }
 }
 
-function showHeroPhoto(url, title, body) {
+function showHeroPhoto(url, title, body, timestamp) {
   var panel = document.getElementById('hero-photo');
   var safeUrl = escapeHtml(url);
   var reason = '';
   if (body.startsWith('ALERT:')) reason = body.split('\n')[0].substring(6).trim();
   else if (title) reason = title;
-  var timeStr = new Date().toLocaleTimeString();
+  var timeStr = timestamp ? new Date(timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
+  var aiBadge = timestamp
+    ? ''
+    : '<div id="hero-ai-badge" class="ai-badge ai-loading">Analyzing...</div>';
   panel.innerHTML = '<img src="' + safeUrl + '" alt="Photo" onclick="openLightbox(\'' + safeUrl + '\')">' +
     '<div class="ai-overlay">' +
-    '<div id="hero-ai-badge" class="ai-badge ai-loading">Analyzing...</div>' +
+    aiBadge +
     '<div class="photo-meta">' + escapeHtml(timeStr + (reason ? ' \u00b7 ' + reason : '')) + '</div>' +
     '</div>';
 }
@@ -466,7 +506,7 @@ function formatBody(text) {
   return s;
 }
 
-function addFeedItem(title, body, priority, attachment) {
+function addFeedItem(title, body, priority, attachment, timestamp) {
   const list = document.getElementById('feed-list');
 
   var placeholder = list.querySelector('.feed-empty');
@@ -478,7 +518,8 @@ function addFeedItem(title, body, priority, attachment) {
   item.className = 'feed-item';
   if (priority >= 5) item.className += ' urgent';
 
-  const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  var d = timestamp ? new Date(timestamp) : new Date();
+  var now = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   var html = '<div class="feed-time">' + now + '</div>';
   html += '<div class="feed-content">';
