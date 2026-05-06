@@ -156,23 +156,7 @@ void loop() {
       String r = SerialLilyGO.readStringUntil('\n'); r.trim();
       if (r.length() > 0) {
         Serial.println("LILYGO: " + r);
-        if (r == "REMOTE_ARM") {
-          if (!armed) {
-            armed = true;
-            digitalWrite(LED_GREEN, HIGH);
-            digitalWrite(LED_RED, LOW);
-            Serial.println("Remote armed");
-          }
-          SerialLilyGO.println("STATUS:ARMED");
-        } else if (r == "REMOTE_DISARM") {
-          if (armed) {
-            armed = false;
-            digitalWrite(LED_GREEN, LOW);
-            digitalWrite(LED_RED, HIGH);
-            Serial.println("Remote disarmed");
-          }
-          SerialLilyGO.println("STATUS:DISARMED");
-        } else if (r == "REQUEST_PHOTO") {
+        if (r == "REQUEST_PHOTO") {
           startAlarm("Photo Requested");
         } else if (r.startsWith("SMS_CMD:")) {
           // Process the SMS command. We deliberately do NOT drain SerialLilyGO
