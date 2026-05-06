@@ -81,6 +81,14 @@
   .ai-verdict.threat-low { background: #14532d; color: #86efac; }
   .ai-verdict.threat-loading { background: #1e293b; color: #94a3b8; }
 
+  /* Optimistic UI */
+  .controls button .spinner { display: inline-block; width: 1em; height: 1em; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 0.3rem; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .controls button.pending { opacity: 0.7; cursor: wait; }
+  .controls button.failed { outline: 2px solid #ef4444; outline-offset: -2px; }
+  .status-card.status-confirming { animation: statusPulse 0.6s ease-in-out; }
+  @keyframes statusPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
   /* Toast */
   #toast { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); background: #1e40af; color: #e0e7ff; padding: 0.6rem 1.2rem; border-radius: 8px; font-size: 0.85rem; font-weight: 600; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 9999; }
   #toast.show { opacity: 1; }
@@ -107,10 +115,10 @@
   <div class="status-subtitle" id="status-subtitle"></div>
 
   <div class="controls">
-    <button class="btn-arm" onclick="sendCommand('ARM')">🛡️ Arm</button>
-    <button class="btn-disarm" onclick="sendCommand('DISARM')">🔓 Disarm</button>
-    <button class="btn-gps" onclick="sendCommand('GPS')">📍 Request GPS</button>
-    <button class="btn-photo" onclick="sendCommand('PHOTO')">📷 Request Photo</button>
+    <button id="btn-arm" class="btn-arm" onclick="sendCommand('ARM', this)">🛡️ Arm</button>
+    <button id="btn-disarm" class="btn-disarm" onclick="sendCommand('DISARM', this)">🔓 Disarm</button>
+    <button id="btn-gps" class="btn-gps" onclick="sendCommand('GPS', this)">📍 Request GPS</button>
+    <button id="btn-photo" class="btn-photo" onclick="sendCommand('PHOTO', this)">📷 Request Photo</button>
   </div>
 
   <div id="map"></div>
@@ -223,9 +231,18 @@ function handleNotification(msg) {
   const tags = msg.tags || [];
   const attachment = msg.attachment || null;
 
-  // Update armed/disarmed status
-  if (body.indexOf('DISARMED') >= 0) updateStatus('DISARMED');
-  else if (body.indexOf('ARMED') >= 0 && body.indexOf('DISARMED') < 0) updateStatus('ARMED');
+  // Update armed/disarmed status + confirm pending commands
+  if (body.indexOf('DISARMED') >= 0) {
+    updateStatus('DISARMED');
+    if (pendingCmd && pendingCmd.cmd === 'DISARM') confirmCommand();
+  } else if (body.indexOf('ARMED') >= 0 && body.indexOf('DISARMED') < 0) {
+    updateStatus('ARMED');
+    if (pendingCmd && pendingCmd.cmd === 'ARM') confirmCommand();
+  }
+
+  // Confirm GPS/PHOTO commands on any relevant response
+  if (pendingCmd && pendingCmd.cmd === 'GPS' && body.indexOf('Location:') >= 0) confirmCommand();
+  if (pendingCmd && pendingCmd.cmd === 'PHOTO' && (attachment || body.indexOf('Photo') >= 0)) confirmCommand();
 
   // Update map if location found
   const locMatch = body.match(/Location:\s*([-\d.]+),([-\d.]+)/);
@@ -431,22 +448,84 @@ function showToast(message) {
   toastTimer = setTimeout(function() { toast.classList.remove('show'); toastTimer = null; }, 3000);
 }
 
-// --- Send Commands ---
-async function sendCommand(cmd) {
-  const btn = event.target;
+// --- Optimistic Command UI ---
+var pendingCmd = null;     // { cmd, btn, timer, originalText, previousStatus }
+var BTN_LABELS = { ARM: '🛡️ Arm', DISARM: '🔓 Disarm', GPS: '📍 Request GPS', PHOTO: '📷 Request Photo' };
+var BTN_PENDING = { ARM: 'Arming…', DISARM: 'Disarming…', GPS: 'Locating…', PHOTO: 'Capturing…' };
+
+async function sendCommand(cmd, btn) {
+  if (pendingCmd) return; // one at a time
+
+  var originalText = btn.innerHTML;
+  var previousStatus = lastKnownStatus;
+
+  // Optimistic state
+  btn.innerHTML = '<span class="spinner"></span>' + BTN_PENDING[cmd];
+  btn.classList.add('pending');
   btn.disabled = true;
+
+  // Optimistic status pill flip
+  if (cmd === 'ARM') updateStatus('ARMED');
+  else if (cmd === 'DISARM') updateStatus('DISARMED');
+
+  pendingCmd = { cmd: cmd, btn: btn, originalText: originalText, previousStatus: previousStatus, timer: null };
+
   try {
-    const resp = await fetch('https://ntfy.sh/' + CMD_TOPIC, {
-      method: 'POST',
-      body: cmd
-    });
+    var resp = await fetch('https://ntfy.sh/' + CMD_TOPIC, { method: 'POST', body: cmd });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     showToast('Command sent: ' + cmd);
   } catch (err) {
-    addFeedItem('Error', 'Failed to send command: ' + cmd, 3, null);
-  } finally {
-    setTimeout(function() { btn.disabled = false; }, 1500);
+    markCommandFailed('Send failed');
+    return;
   }
+
+  // Start 20s confirmation timeout
+  pendingCmd.timer = setTimeout(function() { markCommandFailed('No response in 20s'); }, 20000);
+}
+
+function markCommandFailed(reason) {
+  if (!pendingCmd) return;
+  clearTimeout(pendingCmd.timer);
+  var p = pendingCmd;
+  pendingCmd = null;
+
+  // Revert status pill
+  if (p.cmd === 'ARM' || p.cmd === 'DISARM') {
+    if (p.previousStatus) updateStatus(p.previousStatus);
+    else {
+      var card = document.getElementById('status-card');
+      card.textContent = 'Unknown';
+      card.className = 'status-card status-unknown';
+    }
+  }
+
+  // Show failed state with retry
+  p.btn.classList.remove('pending');
+  p.btn.classList.add('failed');
+  p.btn.disabled = false;
+  p.btn.innerHTML = '⚠ ' + reason + ' — tap to retry';
+  p.btn.onclick = function() {
+    p.btn.classList.remove('failed');
+    p.btn.innerHTML = p.originalText;
+    p.btn.onclick = function() { sendCommand(p.cmd, p.btn); };
+    sendCommand(p.cmd, p.btn);
+  };
+}
+
+function confirmCommand() {
+  if (!pendingCmd) return;
+  clearTimeout(pendingCmd.timer);
+  var p = pendingCmd;
+  pendingCmd = null;
+
+  p.btn.classList.remove('pending');
+  p.btn.disabled = false;
+  p.btn.innerHTML = p.originalText;
+
+  // Brief flash on status card to confirm
+  var card = document.getElementById('status-card');
+  card.classList.add('status-confirming');
+  setTimeout(function() { card.classList.remove('status-confirming'); }, 600);
 }
 </script>
 </body>
