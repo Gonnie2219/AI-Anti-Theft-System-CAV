@@ -233,8 +233,8 @@ function handleNotification(msg) {
   const attachment = msg.attachment || null;
 
   // Update armed/disarmed status
-  if (title.indexOf('ARMED') >= 0 && title.indexOf('DISARMED') < 0) updateStatus('ARMED');
-  else if (title.indexOf('DISARMED') >= 0) updateStatus('DISARMED');
+  if (body.indexOf('DISARMED') >= 0) updateStatus('DISARMED');
+  else if (body.indexOf('ARMED') >= 0 && body.indexOf('DISARMED') < 0) updateStatus('ARMED');
 
   // Update map if location found
   const locMatch = body.match(/Location:\s*([-\d.]+),([-\d.]+)/);
@@ -264,7 +264,7 @@ function handleNotification(msg) {
   const feedItem = addFeedItem(title, body, priority, attachment);
 
   // AI-analyze photos
-  if (attachment && attachment.url && (title.indexOf('Photo Evidence') >= 0 || (attachment.name && attachment.name === 'alert.jpg'))) {
+  if (attachment && attachment.url && attachment.name && /\.jpe?g$/i.test(attachment.name)) {
     analyzePhoto(attachment.url, feedItem);
   }
 
