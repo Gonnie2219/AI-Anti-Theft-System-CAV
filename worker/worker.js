@@ -19,6 +19,7 @@
 const VALID_COMMANDS = ["ARM", "DISARM", "STATUS", "PHOTO", "GPS", "HELP"];
 const OWNER_LAST10 = "6093589220";
 const NTFY_CMD_TOPIC = "antitheft-gonnie-2219-cmd";
+const USE_TWILIO_SMS = false; // Disabled: Twilio trial + T-Mobile A2P 10DLC blocks delivery
 
 export default {
   async scheduled(event, env, ctx) {
@@ -126,11 +127,15 @@ async function handleCron(env) {
 
     // SMS
     if (!dedup.sms) {
-      const smsBody = formatSMSMessage(alert);
-      if (await sendSMS(env, smsBody)) {
-        dedup.sms = true;
+      if (USE_TWILIO_SMS) {
+        const smsBody = formatSMSMessage(alert);
+        if (await sendSMS(env, smsBody)) {
+          dedup.sms = true;
+        } else {
+          console.error(`SMS failed for ${alert.id}`);
+        }
       } else {
-        console.error(`SMS failed for ${alert.id}`);
+        dedup.sms = true; // mark delivered to avoid retry noise
       }
     }
 
@@ -159,11 +164,16 @@ async function handleCron(env) {
     }
 
     const body = reply.message || "(no response)";
-    if (await sendSMS(env, body)) {
-      dedup.sms = true;
-      dedup.whatsapp = true; // not applicable for replies
+    if (USE_TWILIO_SMS) {
+      if (await sendSMS(env, body)) {
+        dedup.sms = true;
+        dedup.whatsapp = true; // not applicable for replies
+      } else {
+        console.error(`SMS failed for reply ${reply.id}`);
+      }
     } else {
-      console.error(`SMS failed for reply ${reply.id}`);
+      dedup.sms = true;
+      dedup.whatsapp = true;
     }
     await env.ANTITHEFT_STATE.put(dedupKey, JSON.stringify(dedup), {
       expirationTtl: 86400,
