@@ -743,12 +743,12 @@ void setup() {
   // worked), full context profile with DNS. Together these tell us
   // whether the bearer is actually up and what the network gave us.
   String csq      = sendAT("AT+CSQ",         "OK", 2000);
-  String cgatt    = sendAT("AT+CGATT?",      "OK", 2000);
+  String cgattQuery = sendAT("AT+CGATT?",     "OK", 2000);
   String cgdcont  = sendAT("AT+CGDCONT?",    "OK", 2000);
   String cgaddr   = sendAT("AT+CGPADDR=1",   "OK", 2000);
   String contrdp  = sendAT("AT+CGCONTRDP=1", "OK", 3000);
   SerialMon.println("Signal: "    + csq.substring(csq.indexOf("+CSQ:")));
-  SerialMon.println("PS attach: " + cgatt.substring(cgatt.indexOf("+CGATT:")));
+  SerialMon.println("PS attach: " + cgattQuery.substring(cgattQuery.indexOf("+CGATT:")));
   SerialMon.println("PDP type:   " + cgdcont.substring(cgdcont.indexOf("+CGDCONT:")));
   SerialMon.println("Address:   "  + cgaddr.substring(cgaddr.indexOf("+CGPADDR:")));
   SerialMon.println("Profile:   "  + contrdp.substring(contrdp.indexOf("+CGCONTRDP:")));
