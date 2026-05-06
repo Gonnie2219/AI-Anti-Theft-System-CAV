@@ -521,7 +521,7 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-// --- Email Alert via ntfy.sh Email header ---
+// --- Email Alert via ntfy.sh JSON publish API ---
 async function sendEmailAlert(title, body, feedItem, msgId) {
   if (msgId) {
     const dedupKey = 'email_sent:' + msgId;
@@ -529,23 +529,29 @@ async function sendEmailAlert(title, body, feedItem, msgId) {
     localStorage.setItem(dedupKey, String(Date.now()));
   }
   try {
-    const resp = await fetch('https://ntfy.sh/' + ALERT_TOPIC, {
+    const resp = await fetch('https://ntfy.sh/', {
       method: 'POST',
-      headers: {
-        'Title': title,
-        'Priority': 'urgent',
-        'Tags': 'rotating_light,email-forwarded',
-        'Email': EMAIL_TO
-      },
-      body: body
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        topic: ALERT_TOPIC,
+        title: title || 'Anti-Theft Alert',
+        message: body,
+        priority: 5,
+        tags: ['rotating_light', 'email-forwarded'],
+        email: EMAIL_TO
+      })
     });
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    if (!resp.ok) {
+      var errBody = ''; try { errBody = await resp.text(); } catch(e) {}
+      throw new Error('HTTP ' + resp.status + ' ' + errBody);
+    }
     var badges = feedItem.querySelector('.feed-badges');
     if (badges) {
       badges.innerHTML += '<span class="feed-badge" style="background:#1e40af;color:#93c5fd">Email sent</span>';
     }
     showToast('Email alert sent');
   } catch (err) {
+    console.error('[Email]', err.message || err);
     var badges = feedItem.querySelector('.feed-badges');
     if (badges) {
       badges.innerHTML += '<span class="feed-badge" style="background:#991b1b;color:#fecaca">Email failed</span>';
