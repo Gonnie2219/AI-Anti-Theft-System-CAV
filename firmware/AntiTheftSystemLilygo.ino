@@ -173,42 +173,45 @@ static bool httpInit(String url, String contentType, String headers) {
   return true;
 }
 
-bool httpPostText(String topic, String headers, String body) {
+// Returns HTTP status code (200 = success) or -1 for TCP/connection failure.
+int httpPostText(String topic, String headers, String body) {
   SerialMon.println("[HTTP] POST /" + topic + "  (" + String(body.length()) + " bytes)");
   if (!httpInit("http://ntfy.sh/" + topic, "text/plain", headers)) {
     sendAT("AT+HTTPTERM", "OK", 1000);
-    return false;
+    return -1;
   }
 
   SerialAT.print("AT+HTTPDATA=");
   SerialAT.print(body.length());
   SerialAT.println(",10000");
-  if (!waitDownloadPrompt(3000)) { sendAT("AT+HTTPTERM", "OK", 1000); return false; }
+  if (!waitDownloadPrompt(3000)) { sendAT("AT+HTTPTERM", "OK", 1000); return -1; }
   SerialAT.print(body);
-  if (!waitOK(15000))            { sendAT("AT+HTTPTERM", "OK", 1000); return false; }
+  if (!waitOK(15000))            { sendAT("AT+HTTPTERM", "OK", 1000); return -1; }
 
   sendAT("AT+HTTPACTION=1", "OK", 3000);
   int status = waitHttpAction(60000);
 
   sendAT("AT+HTTPTERM", "OK", 1000);
-  bool ok = (status == 200);
-  SerialMon.println(ok ? "[HTTP] OK" : "[HTTP] FAIL " + String(status));
-  return ok;
+  if (status < 0)       SerialMon.println("[HTTP] TCP fail");
+  else if (status == 200) SerialMon.println("[HTTP] OK");
+  else                    SerialMon.println("[HTTP] HTTP " + String(status));
+  return status;
 }
 
-bool httpPostBinary(String topic, String headers, const uint8_t* data, size_t len) {
+// Returns HTTP status code (200 = success) or -1 for TCP/connection failure.
+int httpPostBinary(String topic, String headers, const uint8_t* data, size_t len) {
   SerialMon.println("[HTTP] POST /" + topic + "  (" + String(len) + " binary bytes)");
-  if (len > 100000) { SerialMon.println("[HTTP] body too large"); return false; }
+  if (len > 100000) { SerialMon.println("[HTTP] body too large"); return -1; }
 
   if (!httpInit("http://ntfy.sh/" + topic, "application/octet-stream", headers)) {
     sendAT("AT+HTTPTERM", "OK", 1000);
-    return false;
+    return -1;
   }
 
   SerialAT.print("AT+HTTPDATA=");
   SerialAT.print(len);
   SerialAT.println(",60000");
-  if (!waitDownloadPrompt(3000)) { sendAT("AT+HTTPTERM", "OK", 1000); return false; }
+  if (!waitDownloadPrompt(3000)) { sendAT("AT+HTTPTERM", "OK", 1000); return -1; }
 
   size_t sent = 0;
   while (sent < len) {
@@ -217,15 +220,53 @@ bool httpPostBinary(String topic, String headers, const uint8_t* data, size_t le
     sent += chunk;
     delay(10);
   }
-  if (!waitOK(30000)) { sendAT("AT+HTTPTERM", "OK", 1000); return false; }
+  if (!waitOK(30000)) { sendAT("AT+HTTPTERM", "OK", 1000); return -1; }
 
   sendAT("AT+HTTPACTION=1", "OK", 3000);
   int status = waitHttpAction(120000);
 
   sendAT("AT+HTTPTERM", "OK", 1000);
-  bool ok = (status == 200);
-  SerialMon.println(ok ? "[HTTP] OK" : "[HTTP] FAIL " + String(status));
-  return ok;
+  if (status < 0)       SerialMon.println("[HTTP] TCP fail");
+  else if (status == 200) SerialMon.println("[HTTP] OK");
+  else                    SerialMon.println("[HTTP] HTTP " + String(status));
+  return status;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Retry wrappers — exponential backoff, skip retry on 4xx
+// ─────────────────────────────────────────────────────────────
+bool httpPostTextRetry(String topic, String headers, String body) {
+  for (int attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      unsigned long backoff = 2000UL << (attempt - 1);  // 2s, 4s
+      SerialMon.println("[HTTP] retry " + String(attempt) + "/2 in " + String(backoff) + "ms");
+      delay(backoff);
+    }
+    int rc = httpPostText(topic, headers, body);
+    if (rc == 200) return true;
+    if (rc >= 400 && rc < 500) {
+      SerialMon.println("[HTTP] 4xx client error, not retrying");
+      return false;
+    }
+  }
+  return false;
+}
+
+bool httpPostBinaryRetry(String topic, String headers, const uint8_t* data, size_t len) {
+  for (int attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      unsigned long backoff = 2000UL << (attempt - 1);
+      SerialMon.println("[HTTP] retry " + String(attempt) + "/2 in " + String(backoff) + "ms");
+      delay(backoff);
+    }
+    int rc = httpPostBinary(topic, headers, data, len);
+    if (rc == 200) return true;
+    if (rc >= 400 && rc < 500) {
+      SerialMon.println("[HTTP] 4xx client error, not retrying");
+      return false;
+    }
+  }
+  return false;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -567,14 +608,14 @@ void handleAlert(String reason) {
     SerialMon.println("[GPS] GPS not yet acquired - sent without location");
   if (gpsLat.length() > 0)     body += "\nLocation: " + gpsLat + "," + gpsLon + "\n" + gpsMapsLink;
 
-  bool ntfyOk = httpPostText(NTFY_TOPIC, headers, body);
+  bool ntfyOk = httpPostTextRetry(NTFY_TOPIC, headers, body);
 
   // 5) ntfy photo (if we have one)
   if (hasImage && imgSize > 0) {
     String imgHdrs = isPhotoRequest
       ? "Title: Requested Photo\r\nFilename: photo.jpg"
       : "Title: Photo Evidence\r\nFilename: alert.jpg";
-    httpPostBinary(NTFY_TOPIC, imgHdrs, imgBuffer, imgSize);
+    httpPostBinaryRetry(NTFY_TOPIC, imgHdrs, imgBuffer, imgSize);
   }
 
   // 6) Acknowledge to Main
@@ -744,8 +785,8 @@ void setup() {
   if (ts.length() > 0) startBody += "\nTime: " + ts;
 
   if (networkReady) {
-    bool ok = httpPostText(NTFY_TOPIC, "Title: Startup\r\nPriority: low\r\nTags: rocket", startBody);
-    SerialMon.println(ok ? "Startup HTTP OK" : "Startup HTTP failed (continuing)");
+    int rc = httpPostText(NTFY_TOPIC, "Title: Startup\r\nPriority: low\r\nTags: rocket", startBody);
+    SerialMon.println(rc == 200 ? "Startup HTTP OK" : "Startup HTTP failed (continuing)");
   }
 #if USE_NATIVE_SMS
   sendSMS(OWNER_PHONE, "Anti-theft system online.");
