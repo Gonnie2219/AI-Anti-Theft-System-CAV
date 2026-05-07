@@ -44,7 +44,7 @@ const char    OWNER_PHONE[]    = "+16093589220";
 #define HEARTBEAT_MS      300000UL     // 5 minutes
 #define GPS_UPDATE_MS     300000UL     // 5 minutes
 #define WORKER_CMD_POLL_URL "https://antitheft-whatsapp-bridge.gonnie2219.workers.dev/commands/poll"
-#define CMD_POLL_MS         10000UL    // 10 seconds — reduces modem TLS overhead
+#define CMD_POLL_MS         5000UL     // 5 seconds
 #define WORKER_INGEST_URL  "https://antitheft-whatsapp-bridge.gonnie2219.workers.dev/ingest"
 
 #if USE_NATIVE_SMS
@@ -847,10 +847,9 @@ void setup() {
   // NVS — persist last ntfy command ID across reboots
   preferences.begin("antitheft", false);
   lastCmdId = preferences.getString("lastCmdId", "0");
-  // Migration: reset legacy cursors ("now", ntfy alphanumeric IDs) that
-  // don't sort correctly against our timestamp-based command IDs.
-  if (lastCmdId.length() == 0 || lastCmdId == "now" ||
-      (lastCmdId != "0" && !isDigit(lastCmdId.charAt(0)))) {
+  // Migration: reset obviously invalid cursors.  The Worker now returns
+  // ntfy message IDs (alphanumeric), so we only reset empty/"now" values.
+  if (lastCmdId.length() == 0 || lastCmdId == "now") {
     lastCmdId = "0";
     preferences.putString("lastCmdId", lastCmdId);
   }

@@ -6,9 +6,10 @@
  *   SAFE: Cron polls ntfy every 60s → safety-net WhatsApp + photo matching
  * Both paths share a body-content-hash dedup key in KV.
  *
- * Command path (inbound SMS → vehicle):
- *   Twilio webhook → /sms/inbound → KV queue (cmd_queue) → LILYGO polls /commands/poll
- *   Dashboard      → /commands/dispatch → KV queue        → LILYGO polls /commands/poll
+ * Command path (dual-source):
+ *   Dashboard → browser POSTs to ntfy cmd topic (instant) → /commands/poll reads ntfy
+ *   SMS       → Twilio → /sms/inbound → KV cmd_queue → /commands/poll reads KV
+ *   /commands/poll merges both sources with a composite cursor "ntfyId,kvTs"
  *
  * Status path (vehicle → dashboard):
  *   LILYGO posts "System X" to ntfy → cron extracts → KV system_status → GET /status
@@ -567,7 +568,7 @@ async function handleInboundSMS(request, env) {
     return twiml(`Unknown command. Valid: ${VALID_COMMANDS.join(" ")}`);
   }
 
-  // Queue command in KV for LILYGO to poll via /commands/poll
+  // Write to KV — SMS commands use the KV path (Worker→KV is same-edge = fast).
   await enqueueCommand(env, rawBody, "sms");
 
   // Optimistic status update — same as dashboard dispatch, so the dashboard
@@ -583,13 +584,26 @@ async function handleInboundSMS(request, env) {
   return twiml(`Command queued: ${rawBody}`);
 }
 
-// ── Command Queue (single-key KV FIFO) ───────────────────────
-// Uses a single KV key "cmd_queue" instead of list() with prefix,
-// because KV list() has up to 60s eventual consistency across edge
-// locations, which is too slow for 5-second polling.
+// ── Command Queue (dual-source: ntfy + KV) ───────────────────
+// Dashboard commands arrive via ntfy (posted from browser, instant).
+// SMS commands arrive via KV (written by Worker, same-edge = fast).
+// The /commands/poll handler reads both and returns a composite cursor.
+// Worker can't POST to ntfy (Cloudflare shared IPs hit daily quota).
 
 const CMD_QUEUE_KEY = "cmd_queue";
 const CMD_MAX_AGE_MS = 300000; // 5 minutes
+
+async function enqueueCommand(env, command, source) {
+  const raw = await env.ANTITHEFT_STATE.get(CMD_QUEUE_KEY);
+  let queue = [];
+  if (raw) { try { queue = JSON.parse(raw); } catch {} }
+  const cutoff = Date.now() - CMD_MAX_AGE_MS;
+  queue = queue.filter((e) => e.ts > cutoff);
+  const entry = { id: String(Date.now()), command, ts: Date.now(), source };
+  queue.push(entry);
+  await env.ANTITHEFT_STATE.put(CMD_QUEUE_KEY, JSON.stringify(queue), { expirationTtl: 600 });
+  return entry.id;
+}
 
 function corsJson(data, status = 200) {
   return Response.json(data, {
@@ -608,52 +622,67 @@ async function handleStatusPoll(env) {
   return corsJson(parseSystemStatus(raw));
 }
 
-async function enqueueCommand(env, command, source) {
-  const id = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
-  const entry = { id, command, ts: Date.now(), source };
-
-  // Read current queue, append, prune stale entries, write back.
-  // Race condition window is tiny (two commands in same ms) and
-  // worst case is one command overwritten — user retries.
-  const raw = await env.ANTITHEFT_STATE.get(CMD_QUEUE_KEY);
-  let queue = [];
-  if (raw) {
-    try { queue = JSON.parse(raw); } catch {}
-  }
-  const cutoff = Date.now() - CMD_MAX_AGE_MS;
-  queue = queue.filter((e) => e.ts > cutoff);
-  queue.push(entry);
-
-  await env.ANTITHEFT_STATE.put(CMD_QUEUE_KEY, JSON.stringify(queue), {
-    expirationTtl: 600,
-  });
-  return id;
-}
-
 async function handleCommandsPoll(request, env) {
   const url = new URL(request.url);
   const since = url.searchParams.get("since") || "0";
 
-  const raw = await env.ANTITHEFT_STATE.get(CMD_QUEUE_KEY);
-  let queue = [];
-  if (raw) {
-    try { queue = JSON.parse(raw); } catch {}
-  }
+  // Composite cursor: "ntfyId,kvTimestamp" (or just "0" on first boot)
+  const parts = since.split(",");
+  let ntfyCursor = parts[0] || "0";
+  let kvCursor = Number(parts[1]) || 0;
 
   const commands = [];
-  let latestId = "";
+  let ntfyLatest = ntfyCursor;
+  let kvLatest = kvCursor;
 
-  for (const entry of queue) {
-    if (entry.id > latestId) latestId = entry.id;
-    if (entry.id > since) {
-      commands.push({ id: entry.id, command: entry.command, ts: entry.ts });
+  // ── Source 1: ntfy cmd topic (dashboard commands posted from browser) ──
+  const cmdTopic = env.NTFY_TOPIC + "-cmd";
+  const ntfySince = ntfyCursor === "0" ? "5m" : ntfyCursor;
+  try {
+    const resp = await fetch(
+      `https://ntfy.sh/${cmdTopic}/json?since=${encodeURIComponent(ntfySince)}&poll=1`
+    );
+    const text = await resp.text();
+    for (const line of text.trim().split("\n")) {
+      if (!line) continue;
+      try {
+        const msg = JSON.parse(line);
+        if (msg.event === "message") {
+          const cmdText = (msg.message || "").trim().toUpperCase();
+          if (VALID_COMMANDS.includes(cmdText)) {
+            commands.push({ id: msg.id, command: cmdText, ts: msg.time * 1000 });
+          }
+          ntfyLatest = msg.id;
+        }
+      } catch {}
     }
+  } catch (err) {
+    console.error("ntfy cmd poll failed:", err.message);
   }
 
-  // If queue is empty, return current time so LILYGO can advance
-  // past the first-boot sentinel "0" without waiting for a real command.
-  if (!latestId) latestId = String(Date.now());
+  // ── Source 2: KV cmd_queue (SMS commands written by /sms/inbound) ──
+  try {
+    const raw = await env.ANTITHEFT_STATE.get(CMD_QUEUE_KEY);
+    if (raw) {
+      const queue = JSON.parse(raw);
+      for (const entry of queue) {
+        if (entry.ts > kvCursor) {
+          commands.push({ id: entry.id, command: entry.command, ts: entry.ts });
+          if (entry.ts > kvLatest) kvLatest = entry.ts;
+        }
+      }
+    }
+  } catch {}
 
+  // Advance past first-boot if neither source had messages
+  if (ntfyCursor === "0" && ntfyLatest === "0") {
+    ntfyLatest = String(Math.floor(Date.now() / 1000));
+  }
+  if (kvCursor === 0 && kvLatest === 0) {
+    kvLatest = Date.now();
+  }
+
+  const latestId = ntfyLatest + "," + kvLatest;
   return corsJson({ commands, latestId });
 }
 
@@ -667,11 +696,12 @@ async function handleCommandsDispatch(request, env) {
     );
   }
 
+  // Write to KV (SMS commands use this path; dashboard also writes
+  // here as fallback, but the primary fast path is browser→ntfy).
   const id = await enqueueCommand(env, body, "dashboard");
 
   // Optimistic status update — lets the dashboard confirm the command
   // via GET /status without waiting for the full ntfy→cron round-trip.
-  // Cron will overwrite with ground-truth once the LILYGO reports back.
   const STATUS_CMDS = { ARM: "armed", DISARM: "armed", IMMOBILIZE: "immobilized", RESTORE: "immobilized" };
   if (body in STATUS_CMDS) {
     const stored = parseSystemStatus(await env.ANTITHEFT_STATE.get("system_status"));
