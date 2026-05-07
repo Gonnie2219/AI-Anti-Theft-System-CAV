@@ -525,12 +525,12 @@ void handleSMSCommand(String cmd) {
   } else if (cmd == "GPS") {
     updateGPS();
     String gpsReply = gpsLat.length() > 0
-      ? ("GPS: " + gpsLat + "," + gpsLon + "\n" + gpsMapsLink)
-      : "GPS: no fix";
+      ? ("SMS_REPLY: GPS: " + gpsLat + "," + gpsLon + " " + gpsMapsLink)
+      : "SMS_REPLY: GPS: no fix";
     httpPostText(NTFY_TOPIC, "Title: Command Reply\r\nPriority: default\r\nTags: speech_balloon", gpsReply);
   } else if (cmd == "HELP") {
     httpPostText(NTFY_TOPIC, "Title: Command Reply\r\nPriority: default\r\nTags: speech_balloon",
-                 "Commands: ARM DISARM STATUS PHOTO GPS IMMOBILIZE RESTORE HELP");
+                 "SMS_REPLY: Commands: ARM DISARM STATUS PHOTO GPS IMMOBILIZE RESTORE HELP");
   }
   // Unknown commands silently dropped (Worker already validated)
 }
@@ -869,7 +869,7 @@ void loop() {
     else if (cmd.startsWith("SMS_REPLY:")) {
       String reply = cmd.substring(10);
       SerialMon.println("[REPLY] " + reply);
-      httpPostText(NTFY_TOPIC, "Title: Command Reply\r\nPriority: default\r\nTags: speech_balloon", reply);
+      httpPostText(NTFY_TOPIC, "Title: Command Reply\r\nPriority: default\r\nTags: speech_balloon", "SMS_REPLY: " + reply);
     }
   }
 
