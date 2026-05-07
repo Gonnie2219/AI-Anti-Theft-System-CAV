@@ -7,8 +7,11 @@
  * Both paths share a body-content-hash dedup key in KV.
  *
  * Command path (inbound SMS → vehicle):
- *   Twilio webhook → /sms/inbound → KV queue (cmd:*) → LILYGO polls /commands/poll
- *   Dashboard      → /commands/dispatch → KV queue  → LILYGO polls /commands/poll
+ *   Twilio webhook → /sms/inbound → KV queue (cmd_queue) → LILYGO polls /commands/poll
+ *   Dashboard      → /commands/dispatch → KV queue        → LILYGO polls /commands/poll
+ *
+ * Status path (vehicle → dashboard):
+ *   LILYGO posts "System X" to ntfy → cron extracts → KV system_status → GET /status
  *
  * Required secrets (set via `wrangler secret put`):
  *   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN,
@@ -54,8 +57,13 @@ export default {
       return handleCommandsDispatch(request, env);
     }
 
+    // Dashboard polls for current system status
+    if (request.method === "GET" && url.pathname === "/status") {
+      return handleStatusPoll(env);
+    }
+
     // CORS preflight for dashboard cross-origin requests
-    if (request.method === "OPTIONS" && url.pathname.startsWith("/commands/")) {
+    if (request.method === "OPTIONS" && (url.pathname.startsWith("/commands/") || url.pathname === "/status")) {
       return new Response(null, {
         headers: {
           "Access-Control-Allow-Origin": "*",
@@ -292,6 +300,25 @@ async function _handleCron(env) {
       expirationTtl: 86400,
     });
     console.log(`Reply ${reply.id}: sms=${dedup.sms}`);
+  }
+
+  // --- Extract system status from "System X" messages ---
+  // LILYGO posts "System ARMED", "System DISARMED", "System IMMOBILIZED",
+  // "System IGNITION_OK" to ntfy when the Main ESP reports state changes.
+  // Store the latest in KV so the dashboard can poll GET /status.
+  for (const msg of fresh) {
+    const body = (msg.message || "").trim();
+    if (!body.startsWith("System ")) continue;
+    const keyword = body.split("\n")[0].substring(7).trim().toUpperCase();
+    const stored = parseSystemStatus(await env.ANTITHEFT_STATE.get("system_status"));
+    if (keyword === "ARMED")       stored.armed = true;
+    else if (keyword === "DISARMED") stored.armed = false;
+    else if (keyword === "IMMOBILIZED") stored.immobilized = true;
+    else if (keyword === "IGNITION_OK") stored.immobilized = false;
+    else continue;
+    stored.ts = msg.time * 1000;
+    await env.ANTITHEFT_STATE.put("system_status", JSON.stringify(stored));
+    console.log(`Status updated: ${keyword}`);
   }
 
   // Mark orphan photos as consumed so they don't pile up
@@ -559,6 +586,16 @@ function corsJson(data, status = 200) {
     status,
     headers: { "Access-Control-Allow-Origin": "*" },
   });
+}
+
+function parseSystemStatus(raw) {
+  if (!raw) return { armed: false, immobilized: false, ts: 0 };
+  try { return JSON.parse(raw); } catch { return { armed: false, immobilized: false, ts: 0 }; }
+}
+
+async function handleStatusPoll(env) {
+  const raw = await env.ANTITHEFT_STATE.get("system_status");
+  return corsJson(parseSystemStatus(raw));
 }
 
 async function enqueueCommand(env, command, source) {

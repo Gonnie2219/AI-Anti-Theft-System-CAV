@@ -335,6 +335,8 @@ function initDashboard() {
 
   setInterval(checkOfflineStatus, 30000);
   setInterval(updateLastSeen, 30000);
+  setInterval(pollWorkerStatus, 15000);
+  pollWorkerStatus();
 }
 
 async function loadHistory() {
@@ -352,6 +354,30 @@ async function loadHistory() {
     }
   } catch(e) {
     console.error('[History]', e);
+  }
+}
+
+async function pollWorkerStatus() {
+  try {
+    var resp = await fetch(WORKER_URL + '/status');
+    if (!resp.ok) return;
+    var data = await resp.json();
+    // Only apply if the Worker has a real timestamp (cron has seen status messages)
+    if (!data.ts) return;
+    // Don't override optimistic UI while a command is pending
+    if (pendingCmd) return;
+    var workerArmed = data.armed ? 'ARMED' : 'DISARMED';
+    if (workerArmed !== lastKnownStatus) {
+      console.log('[Status poll] correcting: ' + lastKnownStatus + ' -> ' + workerArmed);
+      updateStatus(workerArmed);
+    }
+    var workerImmobilized = !!data.immobilized;
+    if (workerImmobilized !== lastIgnitionState) {
+      console.log('[Status poll] correcting ignition: ' + lastIgnitionState + ' -> ' + workerImmobilized);
+      updateIgnition(workerImmobilized);
+    }
+  } catch(e) {
+    // Silent — SSE is the primary path, this is the safety net
   }
 }
 
