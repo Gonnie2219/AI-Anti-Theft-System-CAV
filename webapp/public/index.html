@@ -242,7 +242,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 const ALERT_TOPIC = 'antitheft-gonnie-2219';
-const CMD_TOPIC = 'antitheft-gonnie-2219-cmd';
+const WORKER_URL = 'https://antitheft-whatsapp-bridge.gonnie2219.workers.dev';
 const EMAIL_TO = 'gonnie2219@gmail.com';
 const EXPECTED_HASH = '90508d9e1b28c32e484c03679d4939618ae1c31424a25a5f0483a93012be0a42';
 
@@ -732,7 +732,7 @@ async function sendCommand(cmd, btn) {
   pendingCmd = { cmd: cmd, btn: btn, originalText: originalText, previousStatus: previousStatus, previousIgnition: previousIgnition, timer: null };
 
   try {
-    var resp = await fetch('https://ntfy.sh/' + CMD_TOPIC, { method: 'POST', body: cmd });
+    var resp = await fetch(WORKER_URL + '/commands/dispatch', { method: 'POST', body: cmd });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     showToast('Command sent: ' + cmd);
   } catch (err) {
