@@ -364,8 +364,19 @@ async function pollWorkerStatus() {
     var data = await resp.json();
     // Only apply if the Worker has a real timestamp (cron has seen status messages)
     if (!data.ts) return;
-    // Don't override optimistic UI while a command is pending
-    if (pendingCmd) return;
+
+    // If a command is pending, use polled status to confirm it
+    // (faster and more reliable than waiting for SSE via ntfy)
+    if (pendingCmd) {
+      var confirmed = false;
+      if (pendingCmd.cmd === 'ARM' && data.armed) confirmed = true;
+      if (pendingCmd.cmd === 'DISARM' && !data.armed) confirmed = true;
+      if (pendingCmd.cmd === 'IMMOBILIZE' && data.immobilized) confirmed = true;
+      if (pendingCmd.cmd === 'RESTORE' && !data.immobilized) confirmed = true;
+      if (confirmed) confirmCommand();
+      return; // Don't correct status while a command is pending
+    }
+
     var workerArmed = data.armed ? 'ARMED' : 'DISARMED';
     if (workerArmed !== lastKnownStatus) {
       console.log('[Status poll] correcting: ' + lastKnownStatus + ' -> ' + workerArmed);
@@ -767,6 +778,12 @@ async function sendCommand(cmd, btn) {
   }
 
   pendingCmd.timer = setTimeout(function() { markCommandFailed('No response'); }, 20000);
+
+  // Fast confirmation via /status poll (doesn't depend on SSE/ntfy).
+  // Worker optimistically updates system_status on dispatch, so this
+  // typically confirms within 2-3 seconds.
+  setTimeout(pollWorkerStatus, 2000);
+  setTimeout(pollWorkerStatus, 5000);
 }
 
 function markCommandFailed(reason) {

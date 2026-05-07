@@ -658,6 +658,18 @@ async function handleCommandsDispatch(request, env) {
   }
 
   const id = await enqueueCommand(env, body, "dashboard");
+
+  // Optimistic status update — lets the dashboard confirm the command
+  // via GET /status without waiting for the full ntfy→cron round-trip.
+  // Cron will overwrite with ground-truth once the LILYGO reports back.
+  const STATUS_CMDS = { ARM: "armed", DISARM: "armed", IMMOBILIZE: "immobilized", RESTORE: "immobilized" };
+  if (body in STATUS_CMDS) {
+    const stored = parseSystemStatus(await env.ANTITHEFT_STATE.get("system_status"));
+    stored[STATUS_CMDS[body]] = (body === "ARM" || body === "IMMOBILIZE");
+    stored.ts = Date.now();
+    await env.ANTITHEFT_STATE.put("system_status", JSON.stringify(stored));
+  }
+
   return corsJson({ status: "queued", command: body, id });
 }
 
