@@ -790,6 +790,19 @@ void setup() {
   String cgact = sendAT("AT+CGACT=1,1", "OK", 10000);
   if (cgact.indexOf("OK") < 0) SerialMon.println("[SETUP] PDP activate failed: " + cgact);
 
+  // SSL stack config for HTTPS requests to Cloudflare workers.dev.
+  // Must run once before any HTTPINIT call that uses AT+HTTPSSL=1.
+  // Context 0 is the default used by the HTTP subsystem.
+  SerialMon.println("[SSL] Configuring TLS...");
+  String ssl1 = sendAT("AT+CSSLCFG=\"sslversion\",0,4", "OK", 3000);      // TLS 1.2
+  String ssl2 = sendAT("AT+CSSLCFG=\"authmode\",0,0", "OK", 3000);        // no cert verify
+  String ssl3 = sendAT("AT+CSSLCFG=\"ignorelocaltime\",0,1", "OK", 3000); // ignore RTC drift
+  String ssl4 = sendAT("AT+CSSLCFG=\"enableSNI\",0,1", "OK", 3000);       // SNI required for CF
+  SerialMon.println("[SSL] sslversion=TLS1.2: " + String(ssl1.indexOf("OK") >= 0 ? "OK" : "FAIL"));
+  SerialMon.println("[SSL] authmode=none:     " + String(ssl2.indexOf("OK") >= 0 ? "OK" : "FAIL"));
+  SerialMon.println("[SSL] ignorelocaltime:   " + String(ssl3.indexOf("OK") >= 0 ? "OK" : "FAIL"));
+  SerialMon.println("[SSL] enableSNI:         " + String(ssl4.indexOf("OK") >= 0 ? "OK" : "FAIL"));
+
   // Log diagnostic info: PDP profile, addresses (v4 and v6 if dual-stack
   // worked), full context profile with DNS. Together these tell us
   // whether the bearer is actually up and what the network gave us.
