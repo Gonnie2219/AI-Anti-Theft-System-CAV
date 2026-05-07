@@ -21,7 +21,10 @@
 const VALID_COMMANDS = ["ARM", "DISARM", "STATUS", "PHOTO", "GPS", "HELP", "IMMOBILIZE", "RESTORE"];
 const OWNER_LAST10 = "6093589220";
 const NTFY_CMD_TOPIC = "antitheft-gonnie-2219-cmd";
-const USE_TWILIO_SMS = false; // Disabled: Twilio trial + T-Mobile A2P 10DLC blocks delivery
+// Set to true after Twilio 10DLC Sole Proprietor campaign is approved.
+// Until then, every send attempt fails with Twilio error 30034 (carrier
+// violation) AND may incur carrier filtering fees on the sending number.
+const USE_TWILIO_SMS = false;
 
 export default {
   async scheduled(event, env, ctx) {
@@ -97,15 +100,23 @@ async function handleIngest(request, env) {
     console.error("[ingest] WhatsApp failed");
   }
 
+  // SMS — text-only alert (no photo available at ingest time)
+  let smsOk = !USE_TWILIO_SMS; // true when disabled → suppresses cron retry
+  if (USE_TWILIO_SMS) {
+    const smsBody = formatSMSMessage(alert, null);
+    smsOk = await sendSMS(env, smsBody);
+    console.log(smsOk ? "[ingest] SMS sent" : "[ingest] SMS failed");
+  }
+
   // Write dedup key so cron doesn't re-send the text alert.
   // Cron can still send a follow-up photo if one arrives.
   await env.ANTITHEFT_STATE.put(
     dedupKey,
-    JSON.stringify({ whatsapp: waOk, sms: true, ingest: true }),
+    JSON.stringify({ whatsapp: waOk, sms: smsOk, ingest: true }),
     { expirationTtl: 86400 }
   );
 
-  return Response.json({ status: "ok", whatsapp: waOk });
+  return Response.json({ status: "ok", whatsapp: waOk, sms: smsOk });
 }
 
 async function handleCron(env) {
@@ -204,7 +215,7 @@ async function _handleCron(env) {
     // SMS
     if (!dedup.sms) {
       if (USE_TWILIO_SMS) {
-        const smsBody = formatSMSMessage(alert);
+        const smsBody = formatSMSMessage(alert, mediaUrl);
         if (await sendSMS(env, smsBody)) {
           dedup.sms = true;
         } else {
@@ -243,7 +254,8 @@ async function _handleCron(env) {
       continue;
     }
 
-    const body = reply.message || "(no response)";
+    let body = reply.message || "(no response)";
+    if (body.startsWith("SMS_REPLY:")) body = body.substring(10).trim();
     if (USE_TWILIO_SMS) {
       if (await sendSMS(env, body)) {
         dedup.sms = true;
@@ -402,7 +414,7 @@ function formatWhatsAppMessage(alert, aiVerdict) {
   return msg.slice(0, 600);
 }
 
-function formatSMSMessage(alert) {
+function formatSMSMessage(alert, photoUrl) {
   const body = alert.message || "";
   const lines = body.split("\n");
 
@@ -417,8 +429,11 @@ function formatSMSMessage(alert) {
     if (urlMatch) mapsUrl = urlMatch[1];
   }
 
+  // Single concise line: reason + Maps URL + photo URL.
+  // Target ≤160 chars to avoid multi-segment billing on long-code SMS.
   let msg = `ALERT: ${reason}`;
-  if (mapsUrl) msg += `\n${mapsUrl}`;
+  if (mapsUrl) msg += ` ${mapsUrl}`;
+  if (photoUrl) msg += ` Photo: ${photoUrl}`;
   return msg.slice(0, 160);
 }
 
@@ -444,9 +459,26 @@ async function sendSMS(env, message) {
 
   if (!resp.ok) {
     const err = await resp.text();
-    console.error(`Twilio SMS error ${resp.status}: ${err}`);
+    // Parse Twilio error JSON for structured logging.
+    // Error 30034 = carrier violation (10DLC campaign not yet approved).
+    // Error 21610 = unsubscribed recipient.
+    try {
+      const errData = JSON.parse(err);
+      const code = errData.code || resp.status;
+      if (code === 30034) {
+        console.error(`Twilio SMS BLOCKED code=30034 (10DLC campaign pending): ${errData.message}`);
+      } else {
+        console.error(`Twilio SMS error code=${code}: ${errData.message}`);
+      }
+    } catch {
+      console.error(`Twilio SMS error HTTP ${resp.status}: ${err.slice(0, 300)}`);
+    }
     return false;
   }
+
+  // NOTE: Twilio may accept the message (HTTP 201) but fail delivery
+  // asynchronously with error 30034. That failure only shows in Twilio
+  // Console or via a status callback webhook, not in this response.
   return true;
 }
 
