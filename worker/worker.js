@@ -18,7 +18,7 @@
  * KV namespace binding: ANTITHEFT_STATE
  */
 
-const VALID_COMMANDS = ["ARM", "DISARM", "STATUS", "PHOTO", "GPS", "HELP"];
+const VALID_COMMANDS = ["ARM", "DISARM", "STATUS", "PHOTO", "GPS", "HELP", "IMMOBILIZE", "RESTORE"];
 const OWNER_LAST10 = "6093589220";
 const NTFY_CMD_TOPIC = "antitheft-gonnie-2219-cmd";
 const USE_TWILIO_SMS = false; // Disabled: Twilio trial + T-Mobile A2P 10DLC blocks delivery
