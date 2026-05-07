@@ -102,11 +102,11 @@ String sendAT(String cmd, String expect, unsigned long timeout) {
 // HTTPPARA (URL/content/headers) -> HTTPDATA (upload body) ->
 // HTTPACTION (execute) -> wait for +HTTPACTION URC -> HTTPTERM.
 //
-// NOTE: We use HTTP, not HTTPS. The SIM7600 supports AT+HTTPSSL=1
-// but in practice it fails TLS handshakes with ntfy.sh (certificate
-// chain issues, modem firmware limitations). Alert content and GPS
-// coordinates are sent in cleartext. Accepted trade-off for now —
-// the ntfy topic name provides obscurity, not security.
+// ntfy.sh requests use HTTP (no TLS). The Worker endpoints (/ingest,
+// /commands/poll) use HTTPS — the SSL stack is configured once in
+// setup() via AT+CSSLCFG, and httpInit() toggles AT+HTTPSSL per URL.
+// Alert content and GPS coordinates sent to ntfy are cleartext.
+// Accepted trade-off — the ntfy topic name provides obscurity.
 
 static int waitHttpAction(unsigned long timeout) {
   unsigned long start = millis();
@@ -382,6 +382,7 @@ void pollWorkerCommands() {
 
   // Parse commands array — find each "command":"VALUE" in the response.
   // Worker returns: {"commands":[{"id":"...","command":"STATUS"},...],"latestId":"..."}
+  bool hadCommands = false;
   int searchPos = 0;
   while (true) {
     int cmdStart = body.indexOf("\"command\":\"", searchPos);
@@ -393,6 +394,7 @@ void pollWorkerCommands() {
     String cmd = body.substring(cmdStart, cmdEnd);
     cmd.trim();
     cmd.toUpperCase();
+    hadCommands = true;
 
     if (skipExecution) {
       SerialMon.println("[CMD] skipped (first boot): " + cmd);
@@ -404,10 +406,14 @@ void pollWorkerCommands() {
     searchPos = cmdEnd + 1;
   }
 
-  // Advance cursor
+  // Advance cursor — only persist to NVS when commands were actually
+  // received.  The Worker returns Date.now() as latestId even for empty
+  // queues, which would cause a flash write every poll cycle (every 5s).
   if (newLatestId.length() > 0) {
     lastCmdId = newLatestId;
-    preferences.putString("lastCmdId", lastCmdId);
+    if (hadCommands) {
+      preferences.putString("lastCmdId", lastCmdId);
+    }
   }
 }
 
