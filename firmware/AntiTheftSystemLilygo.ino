@@ -349,6 +349,14 @@ String httpReadBody(int maxLen) {
 //  ntfy command polling (Twilio SMS → Worker → ntfy → here)
 // ─────────────────────────────────────────────────────────────
 void pollNtfyCommands() {
+  // On first boot (lastCmdId=="0"), since=0 returns up to 12h of cached
+  // messages. We must advance the cursor past them without executing,
+  // otherwise stale ARM/PHOTO commands fire unexpectedly.
+  bool skipExecution = (lastCmdId == "0");
+  if (skipExecution) {
+    SerialMon.println("[CMD] first boot — advancing cursor past stale messages");
+  }
+
   String url = "http://ntfy.sh/" + String(NTFY_CMD_TOPIC)
              + "/json?poll=1&since=" + lastCmdId;
 
@@ -393,9 +401,13 @@ void pollNtfyCommands() {
     newestId = id;
     msg.trim();
     msg.toUpperCase();
-    SerialMon.println("[CMD] ntfy: " + msg);
 
-    handleSMSCommand(msg);
+    if (skipExecution) {
+      SerialMon.println("[CMD] skipped (first boot): " + msg);
+    } else {
+      SerialMon.println("[CMD] ntfy: " + msg);
+      handleSMSCommand(msg);
+    }
   }
 
   if (newestId.length() > 0) {
