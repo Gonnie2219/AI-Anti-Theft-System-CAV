@@ -1,13 +1,14 @@
 /**
- * Cloudflare Worker: ntfy.sh → WhatsApp + SMS Bridge
+ * Cloudflare Worker: Anti-Theft Alert Bridge + Command Queue
  *
  * Two delivery paths for alerts:
  *   FAST: LILYGO POSTs directly to /ingest → immediate WhatsApp delivery
  *   SAFE: Cron polls ntfy every 60s → safety-net WhatsApp + photo matching
  * Both paths share a body-content-hash dedup key in KV.
  *
- * Also accepts inbound SMS webhooks from Twilio and posts commands to the
- * ntfy command topic for the LILYGO to pick up.
+ * Command path (inbound SMS → vehicle):
+ *   Twilio webhook → /sms/inbound → KV queue (cmd:*) → LILYGO polls /commands/poll
+ *   Dashboard      → /commands/dispatch → KV queue  → LILYGO polls /commands/poll
  *
  * Required secrets (set via `wrangler secret put`):
  *   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN,
@@ -20,7 +21,6 @@
 
 const VALID_COMMANDS = ["ARM", "DISARM", "STATUS", "PHOTO", "GPS", "HELP", "IMMOBILIZE", "RESTORE"];
 const OWNER_LAST10 = "6093589220";
-const NTFY_CMD_TOPIC = "antitheft-gonnie-2219-cmd";
 // Set to true after Twilio 10DLC Sole Proprietor campaign is approved.
 // Until then, every send attempt fails with Twilio error 30034 (carrier
 // violation) AND may incur carrier filtering fees on the sending number.
@@ -42,6 +42,27 @@ export default {
     // Inbound SMS webhook from Twilio
     if (request.method === "POST" && url.pathname === "/sms/inbound") {
       return handleInboundSMS(request, env);
+    }
+
+    // Command queue: LILYGO polls for pending commands
+    if (request.method === "GET" && url.pathname === "/commands/poll") {
+      return handleCommandsPoll(request, env);
+    }
+
+    // Command queue: dashboard dispatches commands
+    if (request.method === "POST" && url.pathname === "/commands/dispatch") {
+      return handleCommandsDispatch(request, env);
+    }
+
+    // CORS preflight for dashboard cross-origin requests
+    if (request.method === "OPTIONS" && url.pathname.startsWith("/commands/")) {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        },
+      });
     }
 
     // Health check
@@ -519,17 +540,74 @@ async function handleInboundSMS(request, env) {
     return twiml(`Unknown command. Valid: ${VALID_COMMANDS.join(" ")}`);
   }
 
-  // Post command to ntfy command topic
-  const ntfyResp = await fetch(`https://ntfy.sh/${NTFY_CMD_TOPIC}`, {
-    method: "POST",
-    body: rawBody,
-  });
-  if (!ntfyResp.ok) {
-    console.error(`ntfy cmd post failed: ${ntfyResp.status}`);
-    return twiml("Error queuing command. Try again.");
-  }
+  // Queue command in KV for LILYGO to poll via /commands/poll
+  const id = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+  await env.ANTITHEFT_STATE.put(
+    `cmd:${id}`,
+    JSON.stringify({ command: rawBody, ts: Date.now(), source: "sms" }),
+    { expirationTtl: 300 }
+  );
 
   return twiml(`Command queued: ${rawBody}`);
+}
+
+// ── Command Queue (KV-backed FIFO) ───────────────────────────
+
+function corsJson(data, status = 200) {
+  return Response.json(data, {
+    status,
+    headers: { "Access-Control-Allow-Origin": "*" },
+  });
+}
+
+async function handleCommandsPoll(request, env) {
+  const url = new URL(request.url);
+  const since = url.searchParams.get("since") || "0";
+
+  const list = await env.ANTITHEFT_STATE.list({ prefix: "cmd:" });
+
+  const commands = [];
+  let latestId = "";
+
+  for (const key of list.keys) {
+    const id = key.name.substring(4); // strip "cmd:" prefix
+    if (id > latestId) latestId = id;
+    if (id > since) {
+      const value = await env.ANTITHEFT_STATE.get(key.name);
+      if (value) {
+        try {
+          const parsed = JSON.parse(value);
+          commands.push({ id, command: parsed.command, ts: parsed.ts });
+        } catch {}
+      }
+    }
+  }
+
+  // If no commands exist, return current time so LILYGO can advance
+  // past the first-boot sentinel "0" without waiting for a real command.
+  if (!latestId) latestId = String(Date.now());
+
+  return corsJson({ commands, latestId });
+}
+
+async function handleCommandsDispatch(request, env) {
+  const body = (await request.text()).trim().toUpperCase();
+
+  if (!VALID_COMMANDS.includes(body)) {
+    return corsJson(
+      { error: `Invalid command. Valid: ${VALID_COMMANDS.join(" ")}` },
+      400
+    );
+  }
+
+  const id = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+  await env.ANTITHEFT_STATE.put(
+    `cmd:${id}`,
+    JSON.stringify({ command: body, ts: Date.now(), source: "dashboard" }),
+    { expirationTtl: 300 }
+  );
+
+  return corsJson({ status: "queued", command: body, id });
 }
 
 function twiml(message) {
