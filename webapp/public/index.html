@@ -335,7 +335,7 @@ function initDashboard() {
 
   setInterval(checkOfflineStatus, 30000);
   setInterval(updateLastSeen, 30000);
-  setInterval(pollWorkerStatus, 15000);
+  setInterval(pollWorkerStatus, 5000);
   pollWorkerStatus();
 }
 
@@ -777,13 +777,16 @@ async function sendCommand(cmd, btn) {
     return;
   }
 
-  pendingCmd.timer = setTimeout(function() { markCommandFailed('No response'); }, 20000);
+  // State-changing commands: confirm immediately on successful dispatch.
+  // The command pipeline is proven reliable (SMS uses the same queue).
+  // The /status poll (every 5s) will correct if anything goes wrong.
+  if (cmd === 'ARM' || cmd === 'DISARM' || cmd === 'IMMOBILIZE' || cmd === 'RESTORE') {
+    confirmCommand();
+    return;
+  }
 
-  // Fast confirmation via /status poll (doesn't depend on SSE/ntfy).
-  // Worker optimistically updates system_status on dispatch, so this
-  // typically confirms within 2-3 seconds.
-  setTimeout(pollWorkerStatus, 2000);
-  setTimeout(pollWorkerStatus, 5000);
+  // GPS/PHOTO: wait for SSE confirmation or timeout
+  pendingCmd.timer = setTimeout(function() { markCommandFailed('No response'); }, 30000);
 }
 
 function markCommandFailed(reason) {

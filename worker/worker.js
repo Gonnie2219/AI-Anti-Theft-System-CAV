@@ -570,6 +570,16 @@ async function handleInboundSMS(request, env) {
   // Queue command in KV for LILYGO to poll via /commands/poll
   await enqueueCommand(env, rawBody, "sms");
 
+  // Optimistic status update — same as dashboard dispatch, so the dashboard
+  // reflects SMS-triggered state changes without waiting for the cron cycle.
+  const SMS_STATUS_CMDS = { ARM: "armed", DISARM: "armed", IMMOBILIZE: "immobilized", RESTORE: "immobilized" };
+  if (rawBody in SMS_STATUS_CMDS) {
+    const stored = parseSystemStatus(await env.ANTITHEFT_STATE.get("system_status"));
+    stored[SMS_STATUS_CMDS[rawBody]] = (rawBody === "ARM" || rawBody === "IMMOBILIZE");
+    stored.ts = Date.now();
+    await env.ANTITHEFT_STATE.put("system_status", JSON.stringify(stored));
+  }
+
   return twiml(`Command queued: ${rawBody}`);
 }
 

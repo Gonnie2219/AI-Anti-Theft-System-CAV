@@ -44,7 +44,7 @@ const char    OWNER_PHONE[]    = "+16093589220";
 #define HEARTBEAT_MS      300000UL     // 5 minutes
 #define GPS_UPDATE_MS     300000UL     // 5 minutes
 #define WORKER_CMD_POLL_URL "https://antitheft-whatsapp-bridge.gonnie2219.workers.dev/commands/poll"
-#define CMD_POLL_MS         5000UL     // 5 seconds
+#define CMD_POLL_MS         10000UL    // 10 seconds — reduces modem TLS overhead
 #define WORKER_INGEST_URL  "https://antitheft-whatsapp-bridge.gonnie2219.workers.dev/ingest"
 
 #if USE_NATIVE_SMS

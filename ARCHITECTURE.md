@@ -31,10 +31,11 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
   - UART0 (Serial) = USB debug
   - UART1 (Serial1) = SIM7600 modem (TX=27 RX=26)
   - UART2 (Serial2, RX=21 TX=19) = Main ESP32
-- **Network:** Speedtalk SIM, APN "Wholesale", connects to ntfy.sh via SIM7600 built-in HTTP stack (AT+HTTPINIT/HTTPPARA/HTTPDATA/HTTPACTION)
-- **Network recovery:** `ensureNetwork()` checks AT+CREG? before each HTTP request and re-registers if cellular dropped
-- **Notification transport:** ntfy.sh via SIM7600 HTTP service, which handles DNS resolution and supports IPv6 (required for Speedtalk's IPv6-only PDP context).
-- **Command polling:** Every 5s, polls `antitheft-gonnie-2219-cmd` topic for commands (ARM, DISARM, GPS, PHOTO). Sends `REMOTE_ARM`/`REMOTE_DISARM` to Main ESP32 or handles GPS/photo requests directly.
+- **Network:** Hologram SIM, APN "hologram", IPv4 PDP. Connects to ntfy.sh via SIM7600 built-in HTTP stack (AT+HTTPINIT/HTTPPARA/HTTPDATA/HTTPACTION).
+- **Notification transport:** ntfy.sh via SIM7600 HTTP service. Outbound SMS is handled by the Cloudflare Worker (Twilio API), not native AT+CMGS.
+- **Command polling:** Every 15s, polls `antitheft-gonnie-2219-cmd` ntfy topic for commands (ARM, DISARM, STATUS, PHOTO, GPS, HELP). Inbound SMS commands arrive via Twilio → Worker webhook → ntfy cmd topic → LILYGO. Forwards ARM/DISARM/STATUS/PHOTO to Main ESP32 via `SMS_CMD:` UART message. Handles GPS/HELP locally.
+- **SMS_REPLY round-trip:** When Main sends `SMS_REPLY:<text>`, LILYGO posts it to ntfy with title "Command Reply". The Worker picks it up and sends it as SMS to the user.
+- **NVS persistence:** Last processed ntfy command ID is stored in ESP32 NVS (Preferences library) to avoid replaying commands after reboot.
 - **Notification types:**
   - ALERT with image: ntfy text POST → ntfy image PUT (Title: "Anti-Theft ALERT", Priority: urgent, Tags: rotating_light)
   - Requested photo: ntfy text POST → ntfy image PUT (Title: "Requested Photo", Priority: default, Tags: camera)
@@ -54,6 +55,7 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
 | `ALERT:<reason>` | Alarm triggered |
 | `IMG:<size>` + raw bytes + `IMG_END` | Photo data |
 | `NOIMG` | No photo available |
+| `SMS_REPLY:<text>` | Response text to forward as SMS via Twilio |
 
 ### LILYGO -> Main
 | Message | Meaning |
@@ -64,6 +66,10 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
 | `REMOTE_ARM` | Remote arm command (from web dashboard via ntfy command topic) |
 | `REMOTE_DISARM` | Remote disarm command (from web dashboard via ntfy command topic) |
 | `REQUEST_PHOTO` | Photo request (from web dashboard via ntfy command topic) |
+| `SMS_CMD:ARM` | Arm command from inbound SMS (via Twilio → Worker → ntfy) |
+| `SMS_CMD:DISARM` | Disarm command from inbound SMS |
+| `SMS_CMD:STATUS` | Status request from inbound SMS |
+| `SMS_CMD:PHOTO` | Photo request from inbound SMS |
 
 ### Main -> CAM
 | Message | Meaning |
@@ -111,7 +117,7 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
 | CAM serial RX buffer | 2048 bytes | ESP32Main |
 | Image receive timeout | 30s (outer), 15s (inner) | LILYGO |
 | LILYGO response timeout | 90s | ESP32Main |
-| Heartbeat interval | 2 minutes | LILYGO |
-| Command poll interval | 5000ms | LILYGO |
+| Heartbeat interval | 6 hours | LILYGO |
+| Command poll interval | 15000ms | LILYGO |
 | ntfy alert topic | antitheft-gonnie-2219 | LILYGO |
 | ntfy command topic | antitheft-gonnie-2219-cmd | LILYGO + Web Dashboard |

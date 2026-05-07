@@ -30,8 +30,8 @@ The system uses three interconnected ESP32 boards communicating over UART at 115
                                      │ - Cellular modem │
                                      │ - GPS tracking   │
                                      │ - ntfy.sh alerts │
-                                     │ - SMS alerts     │
-                                     │ - Speedtalk SIM  │
+                                     │ - SMS via Twilio │
+                                     │ - Hologram SIM   │
                                      └──────────────────┘
 ```
 
@@ -49,7 +49,7 @@ The system uses three interconnected ESP32 boards communicating over UART at 115
 | RF Remote | 433MHz (RCSwitch) | Arm/disarm |
 | Vibration Sensor | SW-420 | Tamper detection |
 | Reed Switch | Magnetic | Door open detection |
-| SIM Card | Speedtalk Mobile SIM | Cellular data + SMS |
+| SIM Card | Hologram SIM | Cellular data (IPv4) |
 | LEDs | Green + Red | Armed/disarmed status |
 
 ## Pin Mapping
@@ -172,7 +172,7 @@ All UART communication runs at **115200 baud, 8N1**.
 ### Flash Order
 
 1. **ESP32-CAM** — Flash first, insert SD card, verify `CAM_READY` on serial monitor
-2. **LILYGO** — Flash second, insert Speedtalk SIM, verify `Ready! Waiting for ALERT...` on serial monitor
+2. **LILYGO** — Flash second, insert Hologram SIM, verify `Setup complete` on serial monitor
 3. **Main ESP32** — Flash last, connect wiring to both boards, verify `Status: DISARMED` on serial monitor
 
 ## Notification Setup
@@ -221,24 +221,24 @@ The dashboard connects to the ntfy.sh alert topic via **Server-Sent Events (SSE)
 2. `cd webapp`
 3. `vercel --prod`
 
-### WhatsApp Alerts (Cloudflare Worker)
+### WhatsApp + SMS Alerts (Cloudflare Worker)
 
-A Cloudflare Worker polls ntfy.sh every minute and forwards anti-theft alerts to WhatsApp via Twilio:
+A Cloudflare Worker polls ntfy.sh every minute and forwards anti-theft alerts to WhatsApp + SMS via Twilio:
 
-- **Why:** US A2P 10DLC regulations prevent unregistered SMS delivery on T-Mobile. WhatsApp via Twilio Sandbox bypasses this for urgent alerts.
-- **What gets forwarded:** Only `Anti-Theft ALERT` messages (vibration/door triggers) — heartbeats, status changes, and photos are ignored.
-- **Sandbox caveat:** Twilio WhatsApp Sandbox sessions expire every 72 hours. Rejoin by sending `join <your-keyword>` to +1 415 523 8886 on WhatsApp.
+- **Outbound:** Alert messages are sent via both WhatsApp and SMS. Command replies (STATUS, GPS, HELP responses) are sent via SMS only.
+- **Inbound:** Text `ARM`, `DISARM`, `STATUS`, `PHOTO`, `GPS`, or `HELP` to the Twilio number. The Worker validates the sender, posts the command to the ntfy command topic, and replies with an immediate "Command queued" SMS. The LILYGO polls the command topic every 15 seconds.
+- **Trial account:** SMS is sent from Twilio trial number `+12186566685`. Trial messages get a "Sent from your Twilio trial account - " prefix (cosmetic, goes away after paid upgrade). Production rollout to non-verified recipients requires Twilio paid upgrade + 10DLC registration.
+- **WhatsApp sandbox:** Sessions expire every 72 hours. Rejoin by sending `join <your-keyword>` to +1 415 523 8886 on WhatsApp.
 - **Deploy:** `cd worker && wrangler deploy` (see `worker/README.md` for full setup)
 
-### Speedtalk Mobile SIM
+### Hologram SIM + Twilio SMS
 
-The LILYGO board uses a [Speedtalk](https://www.speedtalkmobile.com) SIM card:
+The LILYGO board uses a [Hologram](https://hologram.io) SIM card:
 
-- APN: `Wholesale`
-- The SIM provides data connectivity for HTTP requests and GPS assistance
-- **SMS alerts:** Alarm events are sent as SMS to the owner's phone number
-- **SMS commands:** Text `ARM`, `DISARM`, `STATUS`, `PHOTO`, `GPS`, or `HELP` to the system's phone number to control it remotely
-- SMS is rate-limited to 10 messages per hour to prevent runaway costs
+- APN: `hologram`
+- Provides IPv4 data connectivity for HTTP requests and GPS assistance
+- **SMS is routed through Twilio** via the Cloudflare Worker (not native AT+CMGS)
+- The firmware can be switched back to native SMS by setting `USE_NATIVE_SMS 1` in the LILYGO sketch
 
 ## Known Issues
 
