@@ -43,8 +43,8 @@ const char    OWNER_PHONE[]    = "+16093589220";
 #define IMG_BUF_SIZE        51200      // 50 KB photo buffer
 #define HEARTBEAT_MS      300000UL     // 5 minutes
 #define GPS_UPDATE_MS     300000UL     // 5 minutes
-#define NTFY_CMD_TOPIC   "antitheft-gonnie-2219-cmd"
-#define NTFY_CMD_POLL_MS    5000UL     // 5 seconds
+#define WORKER_CMD_POLL_URL "https://antitheft-whatsapp-bridge.gonnie2219.workers.dev/commands/poll"
+#define CMD_POLL_MS         5000UL     // 5 seconds
 #define WORKER_INGEST_URL  "https://antitheft-whatsapp-bridge.gonnie2219.workers.dev/ingest"
 
 #if USE_NATIVE_SMS
@@ -66,7 +66,7 @@ String        gpsLat, gpsLon, gpsMapsLink;
 unsigned long lastHeartbeat = 0;
 unsigned long lastGPS       = 0;
 
-// ntfy command polling
+// Command polling (Worker KV queue)
 Preferences   preferences;
 String        lastCmdId;
 unsigned long lastCmdPoll   = 0;
@@ -346,19 +346,17 @@ String httpReadBody(int maxLen) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  ntfy command polling (Twilio SMS → Worker → ntfy → here)
+//  Command polling (SMS / Dashboard → Worker KV queue → here)
 // ─────────────────────────────────────────────────────────────
-void pollNtfyCommands() {
-  // On first boot (lastCmdId=="0"), since=0 returns up to 12h of cached
-  // messages. We must advance the cursor past them without executing,
-  // otherwise stale ARM/PHOTO commands fire unexpectedly.
+void pollWorkerCommands() {
+  // On first boot (lastCmdId=="0"), any commands in the queue are
+  // stale leftovers. Skip them and just advance the cursor.
   bool skipExecution = (lastCmdId == "0");
   if (skipExecution) {
-    SerialMon.println("[CMD] first boot — advancing cursor past stale messages");
+    SerialMon.println("[CMD] first boot — seeding cursor");
   }
 
-  String url = "http://ntfy.sh/" + String(NTFY_CMD_TOPIC)
-             + "/json?poll=1&since=" + lastCmdId;
+  String url = String(WORKER_CMD_POLL_URL) + "?since=" + lastCmdId;
 
   if (!httpInit(url, "", "")) {
     sendAT("AT+HTTPTERM", "OK", 1000);
@@ -379,39 +377,36 @@ void pollNtfyCommands() {
 
   if (body.length() == 0) return;
 
-  // Each line is a JSON object
-  int pos = 0;
-  String newestId;
-  while (pos < (int)body.length()) {
-    int eol = body.indexOf('\n', pos);
-    if (eol < 0) eol = body.length();
-    String line = body.substring(pos, eol);
-    line.trim();
-    pos = eol + 1;
+  // Extract latestId (top-level string field in JSON response)
+  String newLatestId = extractJsonString(body, "latestId");
 
-    if (line.length() == 0) continue;
+  // Parse commands array — find each "command":"VALUE" in the response.
+  // Worker returns: {"commands":[{"id":"...","command":"STATUS"},...],"latestId":"..."}
+  int searchPos = 0;
+  while (true) {
+    int cmdStart = body.indexOf("\"command\":\"", searchPos);
+    if (cmdStart < 0) break;
+    cmdStart += 11;  // skip past "command":"
+    int cmdEnd = body.indexOf('"', cmdStart);
+    if (cmdEnd < 0) break;
 
-    String event = extractJsonString(line, "event");
-    if (event != "message") continue;
-
-    String id  = extractJsonString(line, "id");
-    String msg = extractJsonString(line, "message");
-    if (id.length() == 0 || msg.length() == 0) continue;
-
-    newestId = id;
-    msg.trim();
-    msg.toUpperCase();
+    String cmd = body.substring(cmdStart, cmdEnd);
+    cmd.trim();
+    cmd.toUpperCase();
 
     if (skipExecution) {
-      SerialMon.println("[CMD] skipped (first boot): " + msg);
+      SerialMon.println("[CMD] skipped (first boot): " + cmd);
     } else {
-      SerialMon.println("[CMD] ntfy: " + msg);
-      handleSMSCommand(msg);
+      SerialMon.println("[CMD] worker: " + cmd);
+      handleSMSCommand(cmd);
     }
+
+    searchPos = cmdEnd + 1;
   }
 
-  if (newestId.length() > 0) {
-    lastCmdId = newestId;
+  // Advance cursor
+  if (newLatestId.length() > 0) {
+    lastCmdId = newLatestId;
     preferences.putString("lastCmdId", lastCmdId);
   }
 }
@@ -833,9 +828,10 @@ void setup() {
   // NVS — persist last ntfy command ID across reboots
   preferences.begin("antitheft", false);
   lastCmdId = preferences.getString("lastCmdId", "0");
-  // Validate: ntfy poll=1 requires a numeric timestamp or message ID (alphanumeric).
-  // "now" (old default) causes HTTP 400. Reset any invalid value.
-  if (lastCmdId == "now" || lastCmdId.length() == 0) {
+  // Migration: reset legacy cursors ("now", ntfy alphanumeric IDs) that
+  // don't sort correctly against our timestamp-based command IDs.
+  if (lastCmdId.length() == 0 || lastCmdId == "now" ||
+      (lastCmdId != "0" && !isDigit(lastCmdId.charAt(0)))) {
     lastCmdId = "0";
     preferences.putString("lastCmdId", lastCmdId);
   }
@@ -896,10 +892,9 @@ void loop() {
 
   unsigned long now = millis();
 
-  // 3) Poll ntfy command topic (Twilio SMS → Worker → ntfy → here)
-  if (now - lastCmdPoll > NTFY_CMD_POLL_MS) {
-    SerialMon.println("[CMD] poll (every " + String(NTFY_CMD_POLL_MS / 1000) + "s)");
-    pollNtfyCommands();
+  // 3) Poll Worker command queue (SMS / Dashboard → Worker KV → here)
+  if (now - lastCmdPoll > CMD_POLL_MS) {
+    pollWorkerCommands();
     lastCmdPoll = now;
   }
 
