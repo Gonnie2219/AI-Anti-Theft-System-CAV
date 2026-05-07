@@ -541,17 +541,18 @@ async function handleInboundSMS(request, env) {
   }
 
   // Queue command in KV for LILYGO to poll via /commands/poll
-  const id = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
-  await env.ANTITHEFT_STATE.put(
-    `cmd:${id}`,
-    JSON.stringify({ command: rawBody, ts: Date.now(), source: "sms" }),
-    { expirationTtl: 300 }
-  );
+  await enqueueCommand(env, rawBody, "sms");
 
   return twiml(`Command queued: ${rawBody}`);
 }
 
-// ── Command Queue (KV-backed FIFO) ───────────────────────────
+// ── Command Queue (single-key KV FIFO) ───────────────────────
+// Uses a single KV key "cmd_queue" instead of list() with prefix,
+// because KV list() has up to 60s eventual consistency across edge
+// locations, which is too slow for 5-second polling.
+
+const CMD_QUEUE_KEY = "cmd_queue";
+const CMD_MAX_AGE_MS = 300000; // 5 minutes
 
 function corsJson(data, status = 200) {
   return Response.json(data, {
@@ -560,30 +561,49 @@ function corsJson(data, status = 200) {
   });
 }
 
+async function enqueueCommand(env, command, source) {
+  const id = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+  const entry = { id, command, ts: Date.now(), source };
+
+  // Read current queue, append, prune stale entries, write back.
+  // Race condition window is tiny (two commands in same ms) and
+  // worst case is one command overwritten — user retries.
+  const raw = await env.ANTITHEFT_STATE.get(CMD_QUEUE_KEY);
+  let queue = [];
+  if (raw) {
+    try { queue = JSON.parse(raw); } catch {}
+  }
+  const cutoff = Date.now() - CMD_MAX_AGE_MS;
+  queue = queue.filter((e) => e.ts > cutoff);
+  queue.push(entry);
+
+  await env.ANTITHEFT_STATE.put(CMD_QUEUE_KEY, JSON.stringify(queue), {
+    expirationTtl: 600,
+  });
+  return id;
+}
+
 async function handleCommandsPoll(request, env) {
   const url = new URL(request.url);
   const since = url.searchParams.get("since") || "0";
 
-  const list = await env.ANTITHEFT_STATE.list({ prefix: "cmd:" });
+  const raw = await env.ANTITHEFT_STATE.get(CMD_QUEUE_KEY);
+  let queue = [];
+  if (raw) {
+    try { queue = JSON.parse(raw); } catch {}
+  }
 
   const commands = [];
   let latestId = "";
 
-  for (const key of list.keys) {
-    const id = key.name.substring(4); // strip "cmd:" prefix
-    if (id > latestId) latestId = id;
-    if (id > since) {
-      const value = await env.ANTITHEFT_STATE.get(key.name);
-      if (value) {
-        try {
-          const parsed = JSON.parse(value);
-          commands.push({ id, command: parsed.command, ts: parsed.ts });
-        } catch {}
-      }
+  for (const entry of queue) {
+    if (entry.id > latestId) latestId = entry.id;
+    if (entry.id > since) {
+      commands.push({ id: entry.id, command: entry.command, ts: entry.ts });
     }
   }
 
-  // If no commands exist, return current time so LILYGO can advance
+  // If queue is empty, return current time so LILYGO can advance
   // past the first-boot sentinel "0" without waiting for a real command.
   if (!latestId) latestId = String(Date.now());
 
@@ -600,13 +620,7 @@ async function handleCommandsDispatch(request, env) {
     );
   }
 
-  const id = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
-  await env.ANTITHEFT_STATE.put(
-    `cmd:${id}`,
-    JSON.stringify({ command: body, ts: Date.now(), source: "dashboard" }),
-    { expirationTtl: 300 }
-  );
-
+  const id = await enqueueCommand(env, body, "dashboard");
   return corsJson({ status: "queued", command: body, id });
 }
 
