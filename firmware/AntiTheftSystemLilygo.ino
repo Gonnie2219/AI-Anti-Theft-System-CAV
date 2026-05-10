@@ -47,6 +47,10 @@ const char    OWNER_PHONE[]    = "+16093589220";
 #define CMD_POLL_MS         5000UL     // 5 seconds
 #define WORKER_INGEST_URL  "https://antitheft-whatsapp-bridge.gonnie2219.workers.dev/ingest"
 
+// Shared secret for authenticating with Worker endpoints.
+// See secrets.h.example — copy to secrets.h and fill in the real value.
+#include "secrets.h"
+
 #if USE_NATIVE_SMS
 #define SMS_POLL_MS        60000UL     // safety-net SMS poll
 #define SMS_MAX_PER_HOUR       10
@@ -284,7 +288,8 @@ bool httpPostBinaryRetry(String topic, String headers, const uint8_t* data, size
 // ─────────────────────────────────────────────────────────────
 int httpPostDirect(const char* url, String body) {
   SerialMon.println("[INGEST] POST (" + String(body.length()) + " bytes)");
-  if (!httpInit(String(url), "text/plain", "")) {
+  String authHeader = "X-CMD-Secret: " + String(CMD_SECRET);
+  if (!httpInit(String(url), "text/plain", authHeader)) {
     sendAT("AT+HTTPTERM", "OK", 1000);
     return -1;
   }

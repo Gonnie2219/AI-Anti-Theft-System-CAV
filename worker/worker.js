@@ -19,12 +19,23 @@
  *   TWILIO_FROM, TWILIO_TO          — WhatsApp (whatsapp:+… prefix)
  *   TWILIO_SMS_FROM, TWILIO_SMS_TO  — SMS (plain +1… numbers)
  *   NTFY_TOPIC, ANALYZE_URL (Vercel /api/analyze endpoint)
+ *   CMD_SECRET — shared secret for authenticating dashboard, LILYGO, and ntfy cmd messages
  *
  * KV namespace binding: ANTITHEFT_STATE
  */
 
 const VALID_COMMANDS = ["ARM", "DISARM", "STATUS", "PHOTO", "GPS", "HELP", "IMMOBILIZE", "RESTORE"];
 const OWNER_LAST10 = "6093589220";
+
+// Verify Bearer token or X-CMD-Secret header against the CMD_SECRET env var.
+// Used to authenticate dashboard, LILYGO /ingest, and ntfy cmd topic messages.
+function checkCmdSecret(request, env) {
+  const authHeader = request.headers.get("Authorization") || "";
+  if (authHeader === `Bearer ${env.CMD_SECRET}`) return true;
+  const secretHeader = request.headers.get("X-CMD-Secret") || "";
+  if (secretHeader === env.CMD_SECRET) return true;
+  return false;
+}
 // Set to true after Twilio 10DLC Sole Proprietor campaign is approved.
 // Until then, every send attempt fails with Twilio error 30034 (carrier
 // violation) AND may incur carrier filtering fees on the sending number.
@@ -107,6 +118,10 @@ async function bodyDedupKey(body) {
 
 // ── Fast-path ingest from LILYGO ─────────────────────────────
 async function handleIngest(request, env) {
+  if (!checkCmdSecret(request, env)) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
   const body = (await request.text()).trim();
   if (!body.startsWith("ALERT:")) {
     return Response.json({ status: "ignored", reason: "not an alert" });
@@ -636,6 +651,8 @@ async function handleCommandsPoll(request, env) {
   let kvLatest = kvCursor;
 
   // ── Source 1: ntfy cmd topic (dashboard commands posted from browser) ──
+  // Messages must be prefixed with the shared secret: "SECRET:COMMAND"
+  // This prevents unauthenticated command injection via the public ntfy topic.
   const cmdTopic = env.NTFY_TOPIC + "-cmd";
   const ntfySince = ntfyCursor === "0" ? "5m" : ntfyCursor;
   try {
@@ -648,7 +665,17 @@ async function handleCommandsPoll(request, env) {
       try {
         const msg = JSON.parse(line);
         if (msg.event === "message") {
-          const cmdText = (msg.message || "").trim().toUpperCase();
+          const raw = (msg.message || "").trim();
+          // Validate secret prefix
+          const sepIdx = raw.indexOf(":");
+          if (sepIdx < 0) { ntfyLatest = msg.id; continue; }
+          const prefix = raw.substring(0, sepIdx);
+          const cmdText = raw.substring(sepIdx + 1).trim().toUpperCase();
+          if (prefix !== env.CMD_SECRET) {
+            console.error("ntfy cmd rejected: bad secret");
+            ntfyLatest = msg.id;
+            continue;
+          }
           if (VALID_COMMANDS.includes(cmdText)) {
             commands.push({ id: msg.id, command: cmdText, ts: msg.time * 1000 });
           }
@@ -687,6 +714,10 @@ async function handleCommandsPoll(request, env) {
 }
 
 async function handleCommandsDispatch(request, env) {
+  if (!checkCmdSecret(request, env)) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
   const body = (await request.text()).trim().toUpperCase();
 
   if (!VALID_COMMANDS.includes(body)) {
@@ -742,7 +773,12 @@ async function verifyTwilioSignature(authToken, url, params, expected) {
   );
   const sig = await crypto.subtle.sign("HMAC", key, enc.encode(data));
 
-  // Base64 encode
+  // Base64 encode and compare in constant time to prevent timing attacks
   const computed = btoa(String.fromCharCode(...new Uint8Array(sig)));
-  return computed === expected;
+  if (computed.length !== expected.length) return false;
+  let result = 0;
+  for (let i = 0; i < computed.length; i++) {
+    result |= computed.charCodeAt(i) ^ expected.charCodeAt(i);
+  }
+  return result === 0;
 }

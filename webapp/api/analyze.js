@@ -8,6 +8,19 @@ module.exports = async function handler(req, res) {
   const { imageUrl } = req.body || {};
   if (!imageUrl) return res.status(400).json({ error: 'imageUrl required' });
 
+  // SSRF protection: only allow ntfy.sh image URLs
+  try {
+    const parsed = new URL(imageUrl);
+    if (!parsed.hostname.endsWith('ntfy.sh')) {
+      return res.status(400).json({ error: 'Only ntfy.sh image URLs are allowed' });
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return res.status(400).json({ error: 'Invalid URL protocol' });
+    }
+  } catch {
+    return res.status(400).json({ error: 'Invalid URL' });
+  }
+
   try {
     // Fetch image and convert to base64
     const imgResp = await fetch(imageUrl);

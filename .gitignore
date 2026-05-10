@@ -32,3 +32,6 @@ desktop.ini
 
 # Original .txt source files (kept as .ino in firmware/)
 *.txt
+
+# Firmware secrets (contains CMD_SECRET)
+firmware/secrets.h

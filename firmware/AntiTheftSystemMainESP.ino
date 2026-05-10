@@ -208,6 +208,11 @@ void startAlarm(String reason) {
 
   // Launch alarm task on Core 0 with 16KB stack
   char* reasonCopy = strdup(reason.c_str());
+  if (!reasonCopy) {
+    Serial.println("AlarmTask: strdup failed (OOM)");
+    alarmInProgress = false;
+    return;
+  }
   BaseType_t rc = xTaskCreatePinnedToCore(
     alarmTask,       // function
     "AlarmTask",     // name
@@ -274,6 +279,12 @@ void alarmTask(void* param) {
         String r = SerialLilyGO.readStringUntil('\n'); r.trim();
         if (r.length() > 0) {
           Serial.println("LILYGO: " + r);
+          // Process SMS commands inline so they aren't silently discarded
+          // during alarm. The mutex is already held.
+          if (r.startsWith("SMS_CMD:")) {
+            String smsCmd = r.substring(8);
+            handleSMSCommand(smsCmd);
+          }
           xSemaphoreGive(lilygoMutex);
           if (r.startsWith("LILYGO_OK") || r.startsWith("LILYGO_ERROR")) break;
           continue;
