@@ -242,7 +242,6 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 const ALERT_TOPIC = 'antitheft-gonnie-2219';
-const CMD_TOPIC = 'antitheft-gonnie-2219-cmd';
 const WORKER_URL = 'https://antitheft-whatsapp-bridge.gonnie2219.workers.dev';
 const EMAIL_TO = 'gonnie2219@gmail.com';
 const EXPECTED_HASH = '90508d9e1b28c32e484c03679d4939618ae1c31424a25a5f0483a93012be0a42';
@@ -776,13 +775,13 @@ async function sendCommand(cmd, btn) {
   pendingCmd = { cmd: cmd, btn: btn, originalText: originalText, previousStatus: previousStatus, previousIgnition: previousIgnition, timer: null };
 
   try {
-    // Post to Worker (KV fallback + status tracking) AND ntfy (instant delivery).
-    // Browser posts directly to ntfy — bypasses Cloudflare KV edge caching.
-    // Both include CMD_SECRET for authentication.
-    var [resp] = await Promise.all([
-      fetch(WORKER_URL + '/commands/dispatch', { method: 'POST', headers: { 'Authorization': 'Bearer ' + CMD_SECRET }, body: cmd }),
-      fetch('https://ntfy.sh/' + CMD_TOPIC, { method: 'POST', body: CMD_SECRET + ':' + cmd }).catch(function(){})
-    ]);
+    // Post to Worker KV queue (sole command path).
+    // CMD_SECRET authenticates over HTTPS — never exposed to public channels.
+    var resp = await fetch(WORKER_URL + '/commands/dispatch', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + CMD_SECRET },
+      body: cmd
+    });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     showToast('Command sent: ' + cmd);
   } catch (err) {

@@ -95,6 +95,12 @@ void setup() {
   digitalWrite(IMMOBILIZE_PIN, immobilized ? LOW : HIGH);
   Serial.println(immobilized ? "Ignition: IMMOBILIZED (relay off)" : "Ignition: OK (relay on)");
 
+  // Armed state — persisted via NVS so state survives reboot
+  armed = preferences.getBool("armed", false);
+  digitalWrite(LED_GREEN, armed ? HIGH : LOW);
+  digitalWrite(LED_RED, armed ? LOW : HIGH);
+  Serial.println(armed ? "System: ARMED (restored)" : "System: DISARMED");
+
   Serial2.setRxBufferSize(2048);
   Serial2.begin(115200, SERIAL_8N1, CAM_RX, CAM_TX);
   SerialLilyGO.setRxBufferSize(4096);
@@ -131,7 +137,7 @@ void setup() {
   if (!camReady)    Serial.println("  CAM did not report ready");
   if (!lilygoReady) Serial.println("  LILYGO did not report ready");
 
-  Serial.println("System ready - DISARMED\n");
+  Serial.println(armed ? "System ready - ARMED\n" : "System ready - DISARMED\n");
 }
 
 // ── Main Loop (Core 1) — Always responsive ──────────────────
@@ -142,6 +148,7 @@ void loop() {
     mySwitch.resetAvailable();
     if (code == CODE_ARM && !armed) {
       armed = true;
+      preferences.putBool("armed", true);
       digitalWrite(LED_GREEN, HIGH);
       digitalWrite(LED_RED, LOW);
       Serial.println("System armed");
@@ -151,6 +158,7 @@ void loop() {
       }
     } else if (code == CODE_DISARM && armed) {
       armed = false;
+      preferences.putBool("armed", false);
       digitalWrite(LED_GREEN, LOW);
       digitalWrite(LED_RED, HIGH);
       Serial.println("System disarmed");
@@ -279,11 +287,18 @@ void alarmTask(void* param) {
         String r = SerialLilyGO.readStringUntil('\n'); r.trim();
         if (r.length() > 0) {
           Serial.println("LILYGO: " + r);
-          // Process SMS commands inline so they aren't silently discarded
-          // during alarm. The mutex is already held.
+          // During alarm, only DISARM and RESTORE make sense to act on.
+          // DISARM sets armed=false so sensors won't re-trigger after this
+          // alarm completes.  Photo-forward is already finished at this
+          // point — we're just waiting for LILYGO_OK.  Other commands
+          // (PHOTO, GPS, STATUS) are logged and dropped.
           if (r.startsWith("SMS_CMD:")) {
             String smsCmd = r.substring(8);
-            handleSMSCommand(smsCmd);
+            if (smsCmd == "DISARM" || smsCmd == "RESTORE") {
+              handleSMSCommand(smsCmd);
+            } else {
+              Serial.println("[CMD] dropped (alarm active): " + smsCmd);
+            }
           }
           xSemaphoreGive(lilygoMutex);
           if (r.startsWith("LILYGO_OK") || r.startsWith("LILYGO_ERROR")) break;
@@ -370,6 +385,7 @@ void handleSMSCommand(String cmd) {
   if (cmd == "ARM") {
     if (!armed) {
       armed = true;
+      preferences.putBool("armed", true);
       digitalWrite(LED_GREEN, HIGH);
       digitalWrite(LED_RED, LOW);
       Serial.println("Armed via SMS");
@@ -381,6 +397,7 @@ void handleSMSCommand(String cmd) {
   } else if (cmd == "DISARM") {
     if (armed) {
       armed = false;
+      preferences.putBool("armed", false);
       digitalWrite(LED_GREEN, LOW);
       digitalWrite(LED_RED, HIGH);
       Serial.println("Disarmed via SMS");

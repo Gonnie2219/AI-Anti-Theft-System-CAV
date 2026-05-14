@@ -6,10 +6,10 @@
  *   SAFE: Cron polls ntfy every 60s → safety-net WhatsApp + photo matching
  * Both paths share a body-content-hash dedup key in KV.
  *
- * Command path (dual-source):
- *   Dashboard → browser POSTs to ntfy cmd topic (instant) → /commands/poll reads ntfy
- *   SMS       → Twilio → /sms/inbound → KV cmd_queue → /commands/poll reads KV
- *   /commands/poll merges both sources with a composite cursor "ntfyId,kvTs"
+ * Command path (KV-only):
+ *   Dashboard → browser POSTs to /commands/dispatch → KV cmd_queue → /commands/poll
+ *   SMS       → Twilio → /sms/inbound → KV cmd_queue → /commands/poll
+ *   /commands/poll reads KV with a numeric timestamp cursor, authenticated by DEVICE_POLL_TOKEN
  *
  * Status path (vehicle → dashboard):
  *   LILYGO posts "System X" to ntfy → cron extracts → KV system_status → GET /status
@@ -19,7 +19,8 @@
  *   TWILIO_FROM, TWILIO_TO          — WhatsApp (whatsapp:+… prefix)
  *   TWILIO_SMS_FROM, TWILIO_SMS_TO  — SMS (plain +1… numbers)
  *   NTFY_TOPIC, ANALYZE_URL (Vercel /api/analyze endpoint)
- *   CMD_SECRET — shared secret for authenticating dashboard, LILYGO, and ntfy cmd messages
+ *   CMD_SECRET — shared secret for authenticating dashboard and LILYGO /ingest
+ *   DEVICE_POLL_TOKEN — bearer token for LILYGO /commands/poll authentication
  *
  * KV namespace binding: ANTITHEFT_STATE
  */
@@ -28,7 +29,7 @@ const VALID_COMMANDS = ["ARM", "DISARM", "STATUS", "PHOTO", "GPS", "HELP", "IMMO
 const OWNER_LAST10 = "6093589220";
 
 // Verify Bearer token or X-CMD-Secret header against the CMD_SECRET env var.
-// Used to authenticate dashboard, LILYGO /ingest, and ntfy cmd topic messages.
+// Used to authenticate dashboard /commands/dispatch and LILYGO /ingest.
 function checkCmdSecret(request, env) {
   const authHeader = request.headers.get("Authorization") || "";
   if (authHeader === `Bearer ${env.CMD_SECRET}`) return true;
@@ -599,11 +600,10 @@ async function handleInboundSMS(request, env) {
   return twiml(`Command queued: ${rawBody}`);
 }
 
-// ── Command Queue (dual-source: ntfy + KV) ───────────────────
-// Dashboard commands arrive via ntfy (posted from browser, instant).
-// SMS commands arrive via KV (written by Worker, same-edge = fast).
-// The /commands/poll handler reads both and returns a composite cursor.
-// Worker can't POST to ntfy (Cloudflare shared IPs hit daily quota).
+// ── Command Queue (KV-only) ──────────────────────────────────
+// All commands flow through KV: dashboard → /commands/dispatch → KV,
+// SMS → /sms/inbound → KV.  LILYGO polls /commands/poll (authenticated
+// by DEVICE_POLL_TOKEN).  Single source eliminates duplicate delivery.
 
 const CMD_QUEUE_KEY = "cmd_queue";
 const CMD_MAX_AGE_MS = 300000; // 5 minutes
@@ -638,56 +638,27 @@ async function handleStatusPoll(env) {
 }
 
 async function handleCommandsPoll(request, env) {
+  // Authenticate device
+  const authHeader = request.headers.get("Authorization") || "";
+  if (authHeader !== `Bearer ${env.DEVICE_POLL_TOKEN}`) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
   const url = new URL(request.url);
   const since = url.searchParams.get("since") || "0";
 
-  // Composite cursor: "ntfyId,kvTimestamp" (or just "0" on first boot)
-  const parts = since.split(",");
-  let ntfyCursor = parts[0] || "0";
-  let kvCursor = Number(parts[1]) || 0;
-
-  const commands = [];
-  let ntfyLatest = ntfyCursor;
-  let kvLatest = kvCursor;
-
-  // ── Source 1: ntfy cmd topic (dashboard commands posted from browser) ──
-  // Messages must be prefixed with the shared secret: "SECRET:COMMAND"
-  // This prevents unauthenticated command injection via the public ntfy topic.
-  const cmdTopic = env.NTFY_TOPIC + "-cmd";
-  const ntfySince = ntfyCursor === "0" ? "5m" : ntfyCursor;
-  try {
-    const resp = await fetch(
-      `https://ntfy.sh/${cmdTopic}/json?since=${encodeURIComponent(ntfySince)}&poll=1`
-    );
-    const text = await resp.text();
-    for (const line of text.trim().split("\n")) {
-      if (!line) continue;
-      try {
-        const msg = JSON.parse(line);
-        if (msg.event === "message") {
-          const raw = (msg.message || "").trim();
-          // Validate secret prefix
-          const sepIdx = raw.indexOf(":");
-          if (sepIdx < 0) { ntfyLatest = msg.id; continue; }
-          const prefix = raw.substring(0, sepIdx);
-          const cmdText = raw.substring(sepIdx + 1).trim().toUpperCase();
-          if (prefix !== env.CMD_SECRET) {
-            console.error("ntfy cmd rejected: bad secret");
-            ntfyLatest = msg.id;
-            continue;
-          }
-          if (VALID_COMMANDS.includes(cmdText)) {
-            commands.push({ id: msg.id, command: cmdText, ts: msg.time * 1000 });
-          }
-          ntfyLatest = msg.id;
-        }
-      } catch {}
-    }
-  } catch (err) {
-    console.error("ntfy cmd poll failed:", err.message);
+  // Parse cursor: handle legacy composite "ntfyId,kvTimestamp" and new numeric format
+  let kvCursor = 0;
+  if (since.includes(",")) {
+    kvCursor = Number(since.split(",")[1]) || 0;
+  } else {
+    kvCursor = Number(since) || 0;
   }
 
-  // ── Source 2: KV cmd_queue (SMS commands written by /sms/inbound) ──
+  const commands = [];
+  let kvLatest = kvCursor;
+
+  // Read KV cmd_queue (sole command source — dashboard + SMS both write here)
   try {
     const raw = await env.ANTITHEFT_STATE.get(CMD_QUEUE_KEY);
     if (raw) {
@@ -701,16 +672,12 @@ async function handleCommandsPoll(request, env) {
     }
   } catch {}
 
-  // Advance past first-boot if neither source had messages
-  if (ntfyCursor === "0" && ntfyLatest === "0") {
-    ntfyLatest = String(Math.floor(Date.now() / 1000));
-  }
+  // Advance past first-boot if no messages yet
   if (kvCursor === 0 && kvLatest === 0) {
     kvLatest = Date.now();
   }
 
-  const latestId = ntfyLatest + "," + kvLatest;
-  return corsJson({ commands, latestId });
+  return corsJson({ commands, latestId: String(kvLatest) });
 }
 
 async function handleCommandsDispatch(request, env) {

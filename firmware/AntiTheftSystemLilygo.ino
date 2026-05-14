@@ -23,6 +23,7 @@
 #include <Arduino.h>
 #include <HardwareSerial.h>
 #include <Preferences.h>
+#include "secrets.h"
 
 // ── Pins ─────────────────────────────────────────────────────
 #define MODEM_TX        27
@@ -363,7 +364,8 @@ void pollWorkerCommands() {
 
   String url = String(WORKER_CMD_POLL_URL) + "?since=" + lastCmdId;
 
-  if (!httpInit(url, "", "")) {
+  String authHeader = "Authorization: Bearer " + String(DEVICE_POLL_TOKEN);
+  if (!httpInit(url, "", authHeader)) {
     sendAT("AT+HTTPTERM", "OK", 1000);
     return;
   }
@@ -665,6 +667,7 @@ void handleAlert(String reason) {
   if (gpsLat.length() == 0)
     SerialMon.println("[GPS] GPS not yet acquired - sent without location");
   if (gpsLat.length() > 0)     body += "\nLocation: " + gpsLat + "," + gpsLon + "\n" + gpsMapsLink;
+  if (hasImage)                body += "\nPhoto: https://ntfy.sh/" + String(NTFY_TOPIC);
 
   bool ntfyOk = httpPostTextRetry(NTFY_TOPIC, headers, body);
 
