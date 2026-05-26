@@ -46,11 +46,20 @@
   input[type="tel"]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
   input[type="tel"].invalid { border-color: var(--disarmed); }
 
+  .section-heading { font-size: 0.875rem; font-weight: 700; margin-bottom: 0.65rem; color: var(--text); }
+
   .checkbox-group { display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.25rem; }
   .checkbox-group label { display: flex; align-items: flex-start; gap: 0.6rem; font-size: 0.85rem; color: var(--text-secondary); line-height: 1.4; cursor: pointer; }
   .checkbox-group input[type="checkbox"] { margin-top: 0.15rem; accent-color: var(--accent); flex-shrink: 0; width: 16px; height: 16px; }
   .checkbox-group a { color: var(--accent); text-decoration: none; }
   .checkbox-group a:hover { text-decoration: underline; }
+
+  .section-divider { border: none; border-top: 1px solid var(--border); margin: 1.25rem 0; }
+
+  .optional-section { background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1rem; margin-bottom: 1.25rem; }
+  .optional-section .section-heading { color: var(--text-muted); }
+
+  .sms-helper { font-size: 0.78rem; color: var(--text-muted); line-height: 1.5; margin-top: 0.5rem; padding-left: 1.6rem; }
 
   button[type="submit"] { width: 100%; padding: 0.75rem; border: none; border-radius: var(--radius-sm); background: var(--accent); color: #fff; font-size: 0.9rem; font-weight: 600; cursor: pointer; font-family: inherit; transition: background 0.15s; }
   button[type="submit"]:hover:not(:disabled) { background: #0284c7; }
@@ -82,11 +91,20 @@
       <label class="field-label" for="phone">Phone Number (E.164 format)</label>
       <input type="tel" id="phone" name="phone" placeholder="+1XXXXXXXXXX" pattern="^\+[1-9]\d{9,14}$" required>
 
+      <p class="section-heading">Required to use the service</p>
       <div class="checkbox-group">
-        <label><input type="checkbox" id="cb-receive" required> I consent to receive SMS alerts from the Anti-Theft System at the phone number provided.</label>
-        <label><input type="checkbox" id="cb-rates" required> I understand that message and data rates may apply.</label>
         <label><input type="checkbox" id="cb-terms" required> I have read and agree to the <a href="/terms" target="_blank">Terms and Conditions</a>.</label>
         <label><input type="checkbox" id="cb-privacy" required> I have read and agree to the <a href="/privacy" target="_blank">Privacy Policy</a>.</label>
+      </div>
+
+      <hr class="section-divider">
+
+      <div class="optional-section">
+        <p class="section-heading">Optional — SMS notifications</p>
+        <div class="checkbox-group">
+          <label><input type="checkbox" id="cb-sms"> I consent to receive SMS alerts from the Anti-Theft System at the phone number above. I understand that message and data rates may apply, and that I can reply STOP at any time to opt out.</label>
+        </div>
+        <p class="sms-helper">If you do not opt into SMS, your Anti-Theft System will still deliver alerts via WhatsApp, the live dashboard, and email.</p>
       </div>
 
       <button type="submit" id="submit-btn" disabled>Submit Consent</button>
@@ -108,25 +126,24 @@
 
 <script>
 (function() {
-  const form = document.getElementById('opt-in-form');
-  const phone = document.getElementById('phone');
-  const btn = document.getElementById('submit-btn');
-  const errorMsg = document.getElementById('error-msg');
-  const checkboxes = [
-    document.getElementById('cb-receive'),
-    document.getElementById('cb-rates'),
-    document.getElementById('cb-terms'),
-    document.getElementById('cb-privacy')
-  ];
-  const phonePattern = /^\+[1-9]\d{9,14}$/;
+  var form = document.getElementById('opt-in-form');
+  var phone = document.getElementById('phone');
+  var btn = document.getElementById('submit-btn');
+  var errorMsg = document.getElementById('error-msg');
+  var cbTerms = document.getElementById('cb-terms');
+  var cbPrivacy = document.getElementById('cb-privacy');
+  var cbSms = document.getElementById('cb-sms');
+  var phonePattern = /^\+[1-9]\d{9,14}$/;
 
   function validate() {
-    const allChecked = checkboxes.every(function(cb) { return cb.checked; });
-    const phoneValid = phonePattern.test(phone.value.trim());
-    btn.disabled = !(allChecked && phoneValid);
+    var phoneValid = phonePattern.test(phone.value.trim());
+    var requiredChecked = cbTerms.checked && cbPrivacy.checked;
+    btn.disabled = !(phoneValid && requiredChecked);
   }
 
-  checkboxes.forEach(function(cb) { cb.addEventListener('change', validate); });
+  cbTerms.addEventListener('change', validate);
+  cbPrivacy.addEventListener('change', validate);
+  cbSms.addEventListener('change', validate);
   phone.addEventListener('input', validate);
 
   form.addEventListener('submit', async function(e) {
@@ -135,34 +152,42 @@
     btn.disabled = true;
     btn.textContent = 'Submitting...';
 
-    const payload = {
+    var smsConsent = cbSms.checked;
+    var payload = {
       phone: phone.value.trim(),
       consents: {
-        receive: checkboxes[0].checked,
-        rates: checkboxes[1].checked,
-        terms: checkboxes[2].checked,
-        privacy: checkboxes[3].checked
+        terms: cbTerms.checked,
+        privacy: cbPrivacy.checked
       },
+      smsConsent: smsConsent,
       userAgent: navigator.userAgent,
       timestamp: new Date().toISOString()
     };
 
     try {
-      const resp = await fetch('/api/consent', {
+      var resp = await fetch('/api/consent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      const data = await resp.json();
+      var data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Submission failed');
 
-      document.getElementById('form-card').innerHTML =
-        '<div class="confirmation">' +
-        '<h2>Consent Recorded</h2>' +
-        '<p>Your consent has been successfully recorded.</p>' +
-        '<p>Consent ID: <code>' + data.consentId + '</code></p>' +
+      var confirmHtml = '<div class="confirmation">' +
+        '<h2>Consent Recorded</h2>';
+
+      if (smsConsent) {
+        confirmHtml += '<p>Thank you. You have opted in to receive SMS alerts at ' +
+          phone.value.trim() + '. You may reply STOP at any time to opt out.</p>';
+      } else {
+        confirmHtml += '<p>Thank you. You did NOT opt in to SMS alerts. Your Anti-Theft System will continue to deliver alerts via WhatsApp, the live dashboard, and email. You can return to this page anytime to opt into SMS.</p>';
+      }
+
+      confirmHtml += '<p>Consent ID: <code>' + data.consentId + '</code></p>' +
         '<p>Recorded at: ' + new Date(data.recordedAt).toLocaleString() + '</p>' +
         '</div>';
+
+      document.getElementById('form-card').innerHTML = confirmHtml;
     } catch (err) {
       errorMsg.textContent = err.message;
       errorMsg.style.display = 'block';
