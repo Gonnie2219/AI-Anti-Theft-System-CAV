@@ -47,7 +47,7 @@
   #dashboard { display: none; max-width: 960px; margin: 0 auto; padding: 1rem; }
 
   /* Header */
-  .dash-header { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 0; margin-bottom: 0.75rem; border-bottom: 1px solid var(--border); }
+  .dash-header { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 0; margin-bottom: 0.75rem; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
   .dash-header h1 { font-size: 1.1rem; font-weight: 700; color: var(--text); white-space: nowrap; }
   .status-pill { padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; flex-shrink: 0; }
   .pill-armed { background: var(--armed-bg); color: var(--armed-text); border: 1px solid var(--armed); }
@@ -60,6 +60,10 @@
   .pill-ign-ok { background: var(--armed-bg); color: var(--armed-text); border: 1px solid var(--armed); }
   .pill-ign-cut { background: var(--disarmed-bg); color: var(--disarmed-text); border: 1px solid var(--disarmed); }
 
+  .pill-speed-green { background: var(--armed-bg); color: var(--armed-text); border: 1px solid var(--armed); }
+  .pill-speed-red { background: var(--disarmed-bg); color: var(--disarmed-text); border: 1px solid var(--disarmed); }
+  .pill-speed-gray { background: #1e293b; color: #475569; border: 1px solid #334155; }
+
   .status-pill.confirming { animation: pillPulse 0.6s ease-in-out; }
   @keyframes pillPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
@@ -68,8 +72,13 @@
   .offline-banner a { color: var(--accent); text-decoration: none; }
   .offline-banner a:hover { text-decoration: underline; }
 
+  /* Safety Lockout banner */
+  .safety-lockout-banner { background: #991b1b; border: 1px solid #dc2626; border-radius: var(--radius-sm); padding: 0.75rem 2.5rem 0.75rem 1rem; margin-bottom: 0.75rem; font-size: 0.85rem; color: #fff; line-height: 1.5; position: relative; }
+  .safety-lockout-dismiss { position: absolute; top: 0.5rem; right: 0.75rem; background: none; border: none; color: #fecaca; font-size: 1.2rem; cursor: pointer; padding: 0; line-height: 1; }
+  .safety-lockout-dismiss:hover { color: #fff; }
+
   /* Hero Row */
-  .hero-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 0.75rem; }
+  .hero-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; margin-bottom: 0.75rem; }
   .hero-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   .hero-card-label { padding: 0.5rem 0.75rem; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); border-bottom: 1px solid var(--border); }
   #map { height: 280px; z-index: 0; }
@@ -84,6 +93,18 @@
   .ai-low { background: #14532d; color: #86efac; }
   .ai-loading { background: rgba(30,41,59,0.9); color: #94a3b8; }
 
+  /* Speed Widget */
+  .speed-widget { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 280px; padding: 1rem; }
+  .speed-number { font-size: 3.5rem; font-weight: 700; line-height: 1; }
+  .speed-unit { font-size: 1rem; color: var(--text-secondary); margin-top: 0.25rem; font-weight: 600; }
+  .speed-motion-pill { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 999px; font-size: 0.75rem; font-weight: 700; margin-top: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  .speed-pill-stationary { background: var(--armed-bg); color: var(--armed-text); border: 1px solid var(--armed); }
+  .speed-pill-moving { background: var(--disarmed-bg); color: var(--disarmed-text); border: 1px solid var(--disarmed); }
+  .speed-pill-unknown { background: var(--border); color: var(--text-muted); border: 1px solid var(--text-muted); }
+  .speed-pill-stale { background: #1e293b; color: #475569; border: 1px solid #334155; }
+  .speed-updated { font-size: 0.7rem; color: var(--text-muted); margin-top: 0.5rem; text-align: center; }
+  .speed-stale-sub { color: #64748b; }
+
   /* Action Bar */
   .action-bar { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
   .btn-group { display: flex; gap: 0.35rem; flex: 1; }
@@ -96,7 +117,11 @@
   .btn-gps { background: var(--accent); color: #fff; }
   .btn-photo { background: #7c3aed; color: #fff; }
   .btn-immobilize { background: #dc2626; color: #fff; }
+  .btn-immobilize.stale-warn { background: #ca8a04; }
   .btn-restore { background: #16a34a; color: #fff; }
+
+  /* Immobilize warning */
+  .immobilize-warning { background: rgba(234, 179, 8, 0.1); border: 1px solid #ca8a04; border-radius: var(--radius-sm); padding: 0.5rem 0.75rem; margin-bottom: 0.75rem; font-size: 0.8rem; color: #fbbf24; line-height: 1.4; }
 
   /* Optimistic UI */
   .action-bar button .spinner { display: inline-block; width: 0.85em; height: 0.85em; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 0.25rem; }
@@ -145,6 +170,7 @@
   .confirm-btns button { flex: 1; padding: 0.6rem; border: none; border-radius: var(--radius-sm); font-weight: 600; cursor: pointer; font-family: inherit; font-size: 0.85rem; }
   .btn-confirm-yes { background: var(--disarmed); color: #fff; }
   .btn-confirm-no { background: var(--border); color: var(--text); }
+  .confirm-warning { background: rgba(234, 179, 8, 0.15); border: 1px solid #ca8a04; border-radius: var(--radius-sm); padding: 0.5rem; margin-bottom: 0.75rem; font-size: 0.8rem; color: #fbbf24; line-height: 1.4; text-align: left; }
 
   /* Mobile */
   @media (max-width: 640px) {
@@ -152,6 +178,7 @@
     .hero-row { grid-template-columns: 1fr; }
     #map { height: 220px; }
     .hero-photo, .hero-photo img { min-height: 200px; height: 200px; }
+    .speed-widget { min-height: 200px; }
     .action-bar { flex-wrap: wrap; }
     .btn-group { flex: 1 1 45%; }
     .action-bar button { padding: 0.7rem 0.4rem; font-size: 0.78rem; }
@@ -184,11 +211,16 @@
     <h1>Anti-Theft Dashboard</h1>
     <span id="status-pill" class="status-pill pill-unknown">Unknown</span>
     <span id="ignition-pill" class="status-pill pill-ign-ok">IGNITION OK</span>
+    <span id="speed-pill" class="status-pill pill-speed-gray">&mdash; mph</span>
     <span id="last-seen" class="last-seen"></span>
     <a href="/opt-in" style="margin-left:auto;font-size:0.7rem;color:#64748b;text-decoration:none;white-space:nowrap" onmouseover="this.style.color='#0ea5e9'" onmouseout="this.style.color='#64748b'">SMS Opt-In</a>
   </div>
 
   <div id="offline-banner" class="offline-banner"></div>
+  <div id="safety-lockout-banner" class="safety-lockout-banner" style="display:none">
+    <span id="safety-lockout-text"></span>
+    <button class="safety-lockout-dismiss" onclick="dismissSafetyLockout()">&times;</button>
+  </div>
 
   <div class="hero-row">
     <div class="hero-card">
@@ -199,6 +231,15 @@
       <div class="hero-card-label">Last Photo</div>
       <div id="hero-photo" class="hero-photo">
         <div class="hero-photo-placeholder">No photos yet</div>
+      </div>
+    </div>
+    <div class="hero-card">
+      <div class="hero-card-label">Speed</div>
+      <div id="speed-widget" class="speed-widget">
+        <div id="speed-number" class="speed-number" style="color:#64748b">&mdash;</div>
+        <div class="speed-unit">mph</div>
+        <div id="speed-motion-pill" class="speed-motion-pill speed-pill-unknown">Unknown</div>
+        <div id="speed-updated" class="speed-updated">No data</div>
       </div>
     </div>
   </div>
@@ -217,6 +258,7 @@
       <button id="btn-restore" class="btn-restore" onclick="confirmRestore()">Restore</button>
     </div>
   </div>
+  <div id="immobilize-warning" class="immobilize-warning" style="display:none"></div>
 
   <div class="feed-section">
     <div class="feed-header">Events</div>
@@ -229,6 +271,7 @@
 <!-- Confirm Dialog -->
 <div id="confirm-dialog" class="confirm-overlay" style="display:none">
   <div class="confirm-card">
+    <div id="confirm-warning" class="confirm-warning" style="display:none"></div>
     <p id="confirm-text"></p>
     <div class="confirm-btns">
       <button id="confirm-yes" class="btn-confirm-yes">Confirm</button>
@@ -282,6 +325,12 @@ let lastIgnitionState = false;
 let isOffline = false;
 const seenMsgIds = new Set();
 
+// Speed / motion state
+let currentSpeedMph = null;
+let motionState = null;
+let speedUpdatedAt = null;
+let safetyLockoutTimer = null;
+
 function initDashboard() {
   map = L.map('map', { zoomControl: false }).setView([42.35, -83.07], 13);
   L.control.zoom({ position: 'bottomright' }).addTo(map);
@@ -317,6 +366,19 @@ function initDashboard() {
     }
   }
 
+  // Restore speed/motion state
+  var savedSpeedMph = localStorage.getItem('currentSpeedMph');
+  if (savedSpeedMph !== null && savedSpeedMph !== '') {
+    currentSpeedMph = parseFloat(savedSpeedMph);
+    if (isNaN(currentSpeedMph)) currentSpeedMph = null;
+  }
+  motionState = localStorage.getItem('motionState') || null;
+  var savedSpeedTs = localStorage.getItem('speedUpdatedAt');
+  if (savedSpeedTs) speedUpdatedAt = parseInt(savedSpeedTs);
+  updateSpeedWidget();
+  updateSpeedPill();
+  updateImmobilizeButton();
+
   checkOfflineStatus();
   updateLastSeen();
 
@@ -343,6 +405,8 @@ function initDashboard() {
   setInterval(checkOfflineStatus, 30000);
   setInterval(updateLastSeen, 30000);
   setInterval(pollWorkerStatus, 5000);
+  setInterval(updateSpeedWidget, 10000);
+  setInterval(updateImmobilizeButton, 10000);
   pollWorkerStatus();
 }
 
@@ -429,6 +493,42 @@ function handleNotification(msg, historical) {
   const priority = msg.priority || 3;
   const tags = msg.tags || [];
   const attachment = msg.attachment || null;
+
+  // --- Status Update: silent consumption, no feed item ---
+  if (title === 'Status Update') {
+    var suLines = body.split('\n');
+    var suLat = null, suLon = null;
+    for (var si = 0; si < suLines.length; si++) {
+      var suLine = suLines[si];
+      if (suLine.startsWith('SPEED:')) {
+        var sv = parseFloat(suLine.substring(6));
+        currentSpeedMph = (isNaN(sv) || sv < 0) ? null : sv;
+      } else if (suLine.startsWith('MOTION:')) {
+        motionState = suLine.substring(7).trim() || null;
+      } else if (suLine.startsWith('LAT:') && suLine.length > 4) {
+        var lv = parseFloat(suLine.substring(4));
+        if (!isNaN(lv)) suLat = lv;
+      } else if (suLine.startsWith('LON:') && suLine.length > 4) {
+        var lnv = parseFloat(suLine.substring(4));
+        if (!isNaN(lnv)) suLon = lnv;
+      }
+    }
+    speedUpdatedAt = (historical && msg.time) ? msg.time * 1000 : Date.now();
+    localStorage.setItem('currentSpeedMph', currentSpeedMph !== null ? String(currentSpeedMph) : '');
+    localStorage.setItem('motionState', motionState || '');
+    localStorage.setItem('speedUpdatedAt', String(speedUpdatedAt));
+    updateSpeedWidget();
+    updateSpeedPill();
+    updateImmobilizeButton();
+    if (suLat !== null && suLon !== null) updateMapPosition(suLat, suLon);
+    if (motionState === 'STATIONARY') dismissSafetyLockout();
+    return;
+  }
+
+  // --- Safety Lockout: show banner + fall through to feed ---
+  if (title === 'Safety Lockout' && !historical) {
+    showSafetyLockout(body);
+  }
 
   var bodyLower = body.toLowerCase();
   if (bodyLower.indexOf('disarmed') >= 0) {
@@ -664,6 +764,132 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// --- Speed & Motion ---
+function updateSpeedWidget() {
+  var numberEl = document.getElementById('speed-number');
+  var pillEl = document.getElementById('speed-motion-pill');
+  var updatedEl = document.getElementById('speed-updated');
+  if (!numberEl) return;
+
+  var isStale = speedUpdatedAt && (Date.now() - speedUpdatedAt > 10 * 60 * 1000);
+  var elapsed = speedUpdatedAt ? Math.floor((Date.now() - speedUpdatedAt) / 1000) : null;
+  var ms = motionState || 'UNKNOWN';
+
+  // Color logic
+  var color;
+  if (isStale) {
+    color = '#64748b';
+  } else if (ms === 'MOVING' || (currentSpeedMph !== null && currentSpeedMph >= 5.0)) {
+    color = '#ef4444';
+  } else if (currentSpeedMph !== null && currentSpeedMph >= 1.0) {
+    color = '#eab308';
+  } else if (currentSpeedMph !== null && currentSpeedMph <= 0.9) {
+    color = '#22c55e';
+  } else if (currentSpeedMph === null && ms === 'STATIONARY') {
+    color = '#22c55e';
+  } else {
+    color = '#64748b';
+  }
+
+  numberEl.style.color = color;
+  numberEl.textContent = currentSpeedMph !== null ? currentSpeedMph.toFixed(1) : '\u2014';
+
+  // Motion pill
+  if (isStale) {
+    pillEl.className = 'speed-motion-pill speed-pill-stale';
+  } else if (ms === 'STATIONARY') {
+    pillEl.className = 'speed-motion-pill speed-pill-stationary';
+  } else if (ms === 'MOVING') {
+    pillEl.className = 'speed-motion-pill speed-pill-moving';
+  } else {
+    pillEl.className = 'speed-motion-pill speed-pill-unknown';
+  }
+  pillEl.textContent = ms.charAt(0) + ms.slice(1).toLowerCase();
+
+  // Updated text
+  if (elapsed === null) {
+    updatedEl.innerHTML = 'No data';
+  } else if (isStale) {
+    var mins = Math.floor(elapsed / 60);
+    updatedEl.innerHTML = 'Updated ' + mins + 'm ago <span class="speed-stale-sub">(stale)</span>';
+  } else {
+    if (elapsed < 60) updatedEl.innerHTML = 'Updated ' + elapsed + 's ago';
+    else updatedEl.innerHTML = 'Updated ' + Math.floor(elapsed / 60) + 'm ago';
+  }
+}
+
+function updateSpeedPill() {
+  var pill = document.getElementById('speed-pill');
+  if (!pill) return;
+
+  var isStale = speedUpdatedAt && (Date.now() - speedUpdatedAt > 10 * 60 * 1000);
+  var speedText = currentSpeedMph !== null ? currentSpeedMph.toFixed(1) + ' mph' : '\u2014 mph';
+  pill.textContent = speedText;
+
+  if (isStale || !motionState || motionState === 'UNKNOWN') {
+    pill.className = 'status-pill pill-speed-gray';
+  } else if (motionState === 'MOVING') {
+    pill.className = 'status-pill pill-speed-red';
+  } else if (motionState === 'STATIONARY') {
+    pill.className = 'status-pill pill-speed-green';
+  } else {
+    pill.className = 'status-pill pill-speed-gray';
+  }
+}
+
+function updateImmobilizeButton() {
+  var btn = document.getElementById('btn-immobilize');
+  var warning = document.getElementById('immobilize-warning');
+  if (!btn || !warning) return;
+  if (pendingCmd && pendingCmd.cmd === 'IMMOBILIZE') return;
+
+  var isMoving = motionState === 'MOVING' || (currentSpeedMph !== null && currentSpeedMph > 2);
+  var isStale = speedUpdatedAt && (Date.now() - speedUpdatedAt > 10 * 60 * 1000);
+
+  if (isMoving) {
+    btn.disabled = true;
+    btn.classList.remove('stale-warn');
+    var speedStr = currentSpeedMph !== null ? currentSpeedMph.toFixed(1) : '?';
+    var motStr = motionState || 'Unknown';
+    warning.textContent = '\u26A0 Cannot immobilize while moving (' + speedStr + ' mph, ' + motStr + '). Wait for the vehicle to come to a complete stop.';
+    warning.style.display = 'block';
+  } else if (isStale) {
+    btn.disabled = false;
+    btn.classList.add('stale-warn');
+    warning.style.display = 'none';
+  } else {
+    btn.disabled = false;
+    btn.classList.remove('stale-warn');
+    warning.style.display = 'none';
+  }
+}
+
+function showSafetyLockout(body) {
+  var banner = document.getElementById('safety-lockout-banner');
+  var textEl = document.getElementById('safety-lockout-text');
+  if (!banner || !textEl) return;
+
+  var speed = '?';
+  var time = new Date().toLocaleTimeString();
+  var lines = body.split('\n');
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith('Speed:')) speed = lines[i].substring(6).trim();
+    if (lines[i].startsWith('Time:')) time = lines[i].substring(5).trim();
+  }
+
+  textEl.textContent = '\uD83D\uDEAB Safety lockout \u2014 Immobilize refused at ' + time + ' because vehicle was in motion (' + speed + ').';
+  banner.style.display = 'block';
+
+  if (safetyLockoutTimer) clearTimeout(safetyLockoutTimer);
+  safetyLockoutTimer = setTimeout(dismissSafetyLockout, 60000);
+}
+
+function dismissSafetyLockout() {
+  var banner = document.getElementById('safety-lockout-banner');
+  if (banner) banner.style.display = 'none';
+  if (safetyLockoutTimer) { clearTimeout(safetyLockoutTimer); safetyLockoutTimer = null; }
+}
+
 // --- Email Alert via ntfy.sh JSON publish API ---
 async function sendEmailAlert(title, body, feedItem, msgId) {
   if (msgId) {
@@ -760,6 +986,16 @@ var BTN_PENDING = { ARM: 'Arming\u2026', DISARM: 'Disarming\u2026', GPS: 'Locati
 async function sendCommand(cmd, btn) {
   if (pendingCmd) return;
 
+  // Safety check for IMMOBILIZE
+  if (cmd === 'IMMOBILIZE') {
+    var isMoving = motionState === 'MOVING' || (currentSpeedMph !== null && currentSpeedMph > 2);
+    if (isMoving) {
+      updateImmobilizeButton();
+      showToast('Cannot immobilize \u2014 vehicle is moving');
+      return;
+    }
+  }
+
   var originalText = btn.innerHTML;
   var previousStatus = lastKnownStatus;
   var previousIgnition = lastIgnitionState;
@@ -830,6 +1066,7 @@ function markCommandFailed(reason) {
     p.btn.onclick = function() { sendCommand(p.cmd, p.btn); };
     sendCommand(p.cmd, p.btn);
   };
+  updateImmobilizeButton();
 }
 
 function confirmCommand() {
@@ -845,11 +1082,19 @@ function confirmCommand() {
   var pill = document.getElementById('status-pill');
   pill.classList.add('confirming');
   setTimeout(function() { pill.classList.remove('confirming'); }, 600);
+  updateImmobilizeButton();
 }
 
 // --- Two-step Confirm Dialog ---
-function showConfirmDialog(message, onConfirm) {
+function showConfirmDialog(message, onConfirm, warningText) {
   var dialog = document.getElementById('confirm-dialog');
+  var warningEl = document.getElementById('confirm-warning');
+  if (warningText) {
+    warningEl.textContent = warningText;
+    warningEl.style.display = 'block';
+  } else {
+    warningEl.style.display = 'none';
+  }
   document.getElementById('confirm-text').textContent = message;
   dialog.style.display = 'flex';
   document.getElementById('confirm-yes').onclick = function() {
@@ -863,9 +1108,34 @@ function showConfirmDialog(message, onConfirm) {
 
 function confirmImmobilize() {
   if (pendingCmd) return;
+
+  var isMoving = motionState === 'MOVING' || (currentSpeedMph !== null && currentSpeedMph > 2);
+  if (isMoving) {
+    updateImmobilizeButton();
+    return;
+  }
+
+  var isStale = speedUpdatedAt && (Date.now() - speedUpdatedAt > 10 * 60 * 1000);
+  var warningText = '';
+  if (isStale) {
+    var minsAgo = Math.floor((Date.now() - speedUpdatedAt) / 60000);
+    warningText = '\u26A0 Speed data is ' + minsAgo + ' minutes old. Confirm vehicle is stationary?';
+  }
+
   showConfirmDialog("Are you sure? This will cut the vehicle's ignition.", function() {
+    // Re-check at confirm time
+    var stillMoving = motionState === 'MOVING' || (currentSpeedMph !== null && currentSpeedMph > 2);
+    if (stillMoving) {
+      updateImmobilizeButton();
+      showToast('Immobilize aborted \u2014 vehicle is now moving');
+      return;
+    }
+    // Audit snapshot in events feed
+    addFeedItem('Immobilize Dispatched',
+      'Safety check passed\nSpeed: ' + (currentSpeedMph !== null ? currentSpeedMph.toFixed(1) : '\u2014') + ' mph\nMotion: ' + (motionState || 'Unknown'),
+      2, null, null);
     sendCommand('IMMOBILIZE', document.getElementById('btn-immobilize'));
-  });
+  }, warningText || undefined);
 }
 
 function confirmRestore() {
