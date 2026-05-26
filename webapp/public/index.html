@@ -495,7 +495,8 @@ function handleNotification(msg, historical) {
   const attachment = msg.attachment || null;
 
   // --- Status Update: silent consumption, no feed item ---
-  if (title === 'Status Update') {
+  // Detect by body content (SIM7600 HTTPINIT strips Title/Priority headers)
+  if (body.indexOf('SPEED:') >= 0 && body.indexOf('MOTION:') >= 0) {
     var suLines = body.split('\n');
     var suLat = null, suLon = null;
     for (var si = 0; si < suLines.length; si++) {
@@ -526,7 +527,8 @@ function handleNotification(msg, historical) {
   }
 
   // --- Safety Lockout: show banner + fall through to feed ---
-  if (title === 'Safety Lockout' && !historical) {
+  // Detect by body content (SIM7600 HTTPINIT strips Title header)
+  if (body.indexOf('Immobilize refused') >= 0 && !historical) {
     showSafetyLockout(body);
   }
 
@@ -845,6 +847,7 @@ function updateImmobilizeButton() {
 
   var isMoving = motionState === 'MOVING' || (currentSpeedMph !== null && currentSpeedMph > 2);
   var isStale = speedUpdatedAt && (Date.now() - speedUpdatedAt > 10 * 60 * 1000);
+  var isSensorBlind = (motionState === null || motionState === 'UNKNOWN') && currentSpeedMph === null;
 
   if (isMoving) {
     btn.disabled = true;
@@ -853,7 +856,7 @@ function updateImmobilizeButton() {
     var motStr = motionState || 'Unknown';
     warning.textContent = '\u26A0 Cannot immobilize while moving (' + speedStr + ' mph, ' + motStr + '). Wait for the vehicle to come to a complete stop.';
     warning.style.display = 'block';
-  } else if (isStale) {
+  } else if (isSensorBlind || isStale) {
     btn.disabled = false;
     btn.classList.add('stale-warn');
     warning.style.display = 'none';
@@ -1116,8 +1119,11 @@ function confirmImmobilize() {
   }
 
   var isStale = speedUpdatedAt && (Date.now() - speedUpdatedAt > 10 * 60 * 1000);
+  var isSensorBlind = (motionState === null || motionState === 'UNKNOWN') && currentSpeedMph === null;
   var warningText = '';
-  if (isStale) {
+  if (isSensorBlind) {
+    warningText = '\u26A0 No speed/motion data received yet. Confirm vehicle is stationary?';
+  } else if (isStale) {
     var minsAgo = Math.floor((Date.now() - speedUpdatedAt) / 60000);
     warningText = '\u26A0 Speed data is ' + minsAgo + ' minutes old. Confirm vehicle is stationary?';
   }
