@@ -36,7 +36,7 @@ module.exports = async function handler(req, res) {
         role: 'user',
         content: [
           { type: 'image', source: { type: 'base64', media_type: contentType, data: base64 } },
-          { type: 'text', text: 'You are a security camera AI. Analyze this photo and classify the threat level as HIGH, MEDIUM, or LOW. Reply with exactly one line in this format: THREAT_LEVEL: <HIGH|MEDIUM|LOW> - <short reason>. HIGH = person clearly visible or door/window tampered. MEDIUM = ambiguous shape, partial occlusion, animal. LOW = empty scene, wind, lighting change.' }
+          { type: 'text', text: 'You are analyzing a photo from a vehicle anti-theft alarm that has already triggered (vibration or door-open sensor fired). Your job is to confirm what the sensor caught, not to prove a threat from scratch. Classify as HIGH, MEDIUM, or LOW.\n\nHIGH: ANY human figure visible — face, body, hand, silhouette, partial limb, reflection of a person. A person present near an armed vehicle that triggered its alarm is by definition high-priority regardless of image quality, lighting, blur, or whether intent is clear.\nMEDIUM: Ambiguous shapes that could be a person but cannot be confirmed, OR significant scene change with no clear human figure (open door, large shadow, motion blur without identifiable body part).\nLOW: No human-like shapes. Scene matches an expected empty environment (empty seat, empty driveway, normal interior).\n\nReply with exactly one line: THREAT_LEVEL: <HIGH|MEDIUM|LOW> - <what you see>. State what is visible factually (e.g. "face visible", "hand on door handle", "empty seat"). Do not comment on image quality.' }
         ]
       }]
     });
