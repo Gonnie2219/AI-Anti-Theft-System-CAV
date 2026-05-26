@@ -71,6 +71,23 @@ String        gpsLat, gpsLon, gpsMapsLink;
 unsigned long lastHeartbeat = 0;
 unsigned long lastGPS       = 0;
 
+// GPS speed (parsed from +CGPSINFO field 8)
+float gpsSpeedKnots = 0.0;
+float gpsSpeedMph   = -1.0;  // -1 = no fix / unknown
+float gpsSpeedKmh   = 0.0;
+
+// Motion state from Main ESP32
+String motionState = "UNKNOWN";
+float  accelDelta  = 0.0;
+float  gyroMag     = 0.0;
+unsigned long lastMotionUpdateMs = 0;
+
+// Status push timing
+unsigned long lastStatusPushMs = 0;
+
+// Alarm in progress (synchronous — guards status push from firing during handleAlert)
+bool alarmInProgress = false;
+
 // Command polling (Worker KV queue)
 Preferences   preferences;
 String        lastCmdId;
@@ -431,16 +448,28 @@ void updateGPS() {
   String r = sendAT("AT+CGPSINFO", "OK", 2000);
   SerialMon.println("[GPS] raw: " + r);
   int idx = r.indexOf("+CGPSINFO:");
-  if (idx < 0) return;
+  if (idx < 0) {
+    gpsSpeedMph = -1.0;
+    SerialMain.println("GPS_SPEED:" + String(gpsSpeedMph, 1));
+    return;
+  }
   String info = r.substring(idx + 11);
   info.trim();
-  if (info.length() < 10 || info.charAt(0) == ',') return;
+  if (info.length() < 10 || info.charAt(0) == ',') {
+    gpsSpeedMph = -1.0;
+    SerialMain.println("GPS_SPEED:" + String(gpsSpeedMph, 1));
+    return;
+  }
 
   int c1 = info.indexOf(',');
   int c2 = info.indexOf(',', c1 + 1);
   int c3 = info.indexOf(',', c2 + 1);
   int c4 = info.indexOf(',', c3 + 1);
-  if (c4 < 0) return;
+  if (c4 < 0) {
+    gpsSpeedMph = -1.0;
+    SerialMain.println("GPS_SPEED:" + String(gpsSpeedMph, 1));
+    return;
+  }
 
   float lat = info.substring(0, 2).toFloat() + info.substring(2, c1).toFloat() / 60.0;
   if (info.substring(c1 + 1, c2) == "S") lat = -lat;
@@ -450,6 +479,28 @@ void updateGPS() {
   gpsLat = String(lat, 6);
   gpsLon = String(lon, 6);
   gpsMapsLink = "https://maps.google.com/?q=" + gpsLat + "," + gpsLon;
+
+  // Parse speed (field 7 = speed in knots)
+  // +CGPSINFO: <lat>,<N/S>,<lon>,<E/W>,<date>,<UTC>,<alt>,<speed_knots>,<course>
+  int c5 = info.indexOf(',', c4 + 1);
+  int c6 = (c5 >= 0) ? info.indexOf(',', c5 + 1) : -1;
+  int c7 = (c6 >= 0) ? info.indexOf(',', c6 + 1) : -1;
+  if (c7 >= 0) {
+    int c8 = info.indexOf(',', c7 + 1);
+    String speedStr = (c8 >= 0) ? info.substring(c7 + 1, c8) : info.substring(c7 + 1);
+    speedStr.trim();
+    gpsSpeedKnots = (speedStr.length() > 0) ? speedStr.toFloat() : 0.0;
+    gpsSpeedMph = gpsSpeedKnots * 1.15078;
+    gpsSpeedKmh = gpsSpeedKnots * 1.852;
+  } else {
+    gpsSpeedKnots = 0.0;
+    gpsSpeedMph = 0.0;
+    gpsSpeedKmh = 0.0;
+  }
+
+  SerialMon.println("[GPS] speed: " + String(gpsSpeedKnots, 2) + " kn / " +
+                    String(gpsSpeedMph, 1) + " mph / " + String(gpsSpeedKmh, 1) + " km/h");
+  SerialMain.println("GPS_SPEED:" + String(gpsSpeedMph, 1));
 }
 
 String getModemTime() {
@@ -631,6 +682,7 @@ bool receiveImage() {
 //  Notifications
 // ─────────────────────────────────────────────────────────────
 void handleAlert(String reason) {
+  alarmInProgress = true;
   bool isPhotoRequest = (reason == "Photo Requested");
   SerialMon.println(isPhotoRequest ? "\n[PHOTO_REQ]" : "\n[ALERT] " + reason);
   digitalWrite(LED_PIN, HIGH);
@@ -667,6 +719,7 @@ void handleAlert(String reason) {
   if (gpsLat.length() == 0)
     SerialMon.println("[GPS] GPS not yet acquired - sent without location");
   if (gpsLat.length() > 0)     body += "\nLocation: " + gpsLat + "," + gpsLon + "\n" + gpsMapsLink;
+  if (gpsSpeedMph >= 0.0)      body += "\nSpeed: " + String(gpsSpeedMph, 1) + " mph";
   if (hasImage)                body += "\nPhoto: https://ntfy.sh/" + String(NTFY_TOPIC);
 
   bool ntfyOk = httpPostTextRetry(NTFY_TOPIC, headers, body);
@@ -694,6 +747,7 @@ void handleAlert(String reason) {
 
   digitalWrite(LED_PIN, LOW);
   SerialMon.println(isPhotoRequest ? "[PHOTO_REQ] complete\n" : "[ALERT] complete\n");
+  alarmInProgress = false;
 }
 
 void handleStatus(String status) {
@@ -702,6 +756,8 @@ void handleStatus(String status) {
 
   String body = "System " + status;
   if (gpsLat.length() > 0) body += "\nLocation: " + gpsLat + "," + gpsLon;
+  if (gpsSpeedMph >= 0.0)  body += "\nSpeed: " + String(gpsSpeedMph, 1) + " mph";
+  body += "\nMotion: " + motionState;
 
   String h = "Title: System " + status + "\r\nPriority: low\r\nTags: ";
   h += (status == "ARMED") ? "lock" : "unlock";
@@ -716,8 +772,21 @@ void sendHeartbeat() {
   String ts = getModemTime();
   if (ts.length() > 0)     body += "\nTime: " + ts;
   if (gpsLat.length() > 0) body += "\nLocation: " + gpsLat + "," + gpsLon;
+  if (gpsSpeedMph >= 0.0)  body += "\nSpeed: " + String(gpsSpeedMph, 1) + " mph";
+  body += "\nMotion: " + motionState;
 
   httpPostText(NTFY_TOPIC, "Title: Heartbeat\r\nPriority: min\r\nTags: green_circle", body);
+}
+
+void sendStatusUpdate() {
+  String body = "SPEED:" + String(gpsSpeedMph, 1);
+  body += "\nMOTION:" + motionState;
+  body += "\nLAT:" + gpsLat;
+  body += "\nLON:" + gpsLon;
+  String ts = getModemTime();
+  if (ts.length() > 0) body += "\nTS:" + ts;
+
+  httpPostText(NTFY_TOPIC, "Title: Status Update\r\nPriority: min\r\nTags: status_update", body);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -882,9 +951,10 @@ void setup() {
 #endif
 
   digitalWrite(LED_PIN, LOW);
-  lastHeartbeat = millis();
-  lastCmdPoll   = millis();
-  lastGPS       = millis();
+  lastHeartbeat    = millis();
+  lastCmdPoll      = millis();
+  lastGPS          = millis();
+  lastStatusPushMs = millis();
 #if USE_NATIVE_SMS
   lastSMSPoll   = millis();
 #endif
@@ -904,6 +974,28 @@ void loop() {
       String reply = cmd.substring(10);
       SerialMon.println("[REPLY] " + reply);
       httpPostText(NTFY_TOPIC, "Title: Command Reply\r\nPriority: default\r\nTags: speech_balloon", "SMS_REPLY: " + reply);
+    }
+    else if (cmd.startsWith("MOTION:")) {
+      // Parse "MOTION:<state>,A:<f>,G:<f>"
+      String payload = cmd.substring(7);
+      int aIdx = payload.indexOf(",A:");
+      int gIdx = payload.indexOf(",G:");
+      if (aIdx >= 0) motionState = payload.substring(0, aIdx);
+      if (aIdx >= 0 && gIdx > aIdx) accelDelta = payload.substring(aIdx + 3, gIdx).toFloat();
+      if (gIdx >= 0) gyroMag = payload.substring(gIdx + 3).toFloat();
+      lastMotionUpdateMs = millis();
+      SerialMon.println("[MOTION] " + motionState + " A:" + String(accelDelta, 2) + " G:" + String(gyroMag, 2));
+    }
+    else if (cmd.startsWith("IMMOBILIZE_REJECTED:")) {
+      SerialMon.println("[SAFETY] " + cmd);
+      String ts = getModemTime();
+      String body = "Immobilize refused \xe2\x80\x94 vehicle is in motion.";
+      body += "\nSpeed: " + String(gpsSpeedMph, 1) + " mph";
+      body += "\nMotion: " + motionState;
+      body += "\nAccelDelta: " + String(accelDelta, 2) + " m/s^2";
+      body += "\nGyroMag: " + String(gyroMag, 2) + " rad/s";
+      if (ts.length() > 0) body += "\nTime: " + ts;
+      httpPostTextRetry(NTFY_TOPIC, "Title: Safety Lockout\r\nPriority: high\r\nTags: warning", body);
     }
   }
 
@@ -942,6 +1034,15 @@ void loop() {
   if (now - lastHeartbeat > HEARTBEAT_MS) {
     sendHeartbeat();
     lastHeartbeat = now;
+  }
+
+  // 7) Periodic status update
+  if (!alarmInProgress) {
+    unsigned long statusInterval = (motionState == "MOVING") ? 30000UL : 120000UL;
+    if (now - lastStatusPushMs >= statusInterval) {
+      sendStatusUpdate();
+      lastStatusPushMs = now;
+    }
   }
 
   delay(50);
