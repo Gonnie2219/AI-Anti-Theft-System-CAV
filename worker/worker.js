@@ -659,13 +659,14 @@ async function handleCommandsPoll(request, env) {
   let kvLatest = kvCursor;
 
   // Read KV cmd_queue (sole command source — dashboard + SMS both write here)
+  const readTs = Date.now();
   try {
     const raw = await env.ANTITHEFT_STATE.get(CMD_QUEUE_KEY);
     if (raw) {
       const queue = JSON.parse(raw);
       for (const entry of queue) {
         if (entry.ts > kvCursor) {
-          commands.push({ id: entry.id, command: entry.command, ts: entry.ts });
+          commands.push({ id: entry.id, command: entry.command, ts: entry.ts, writeTs: entry.ts });
           if (entry.ts > kvLatest) kvLatest = entry.ts;
         }
       }
@@ -677,7 +678,7 @@ async function handleCommandsPoll(request, env) {
     kvLatest = Date.now();
   }
 
-  return corsJson({ commands, latestId: String(kvLatest) });
+  return corsJson({ commands, latestId: String(kvLatest), readTs });
 }
 
 async function handleCommandsDispatch(request, env) {
@@ -694,9 +695,9 @@ async function handleCommandsDispatch(request, env) {
     );
   }
 
-  // Write to KV (SMS commands use this path; dashboard also writes
-  // here as fallback, but the primary fast path is browser→ntfy).
+  // Write to KV — sole command path for both dashboard and SMS.
   const id = await enqueueCommand(env, body, "dashboard");
+  const writeTs = Date.now();
 
   // Optimistic status update — lets the dashboard confirm the command
   // via GET /status without waiting for the full ntfy→cron round-trip.
@@ -704,11 +705,11 @@ async function handleCommandsDispatch(request, env) {
   if (body in STATUS_CMDS) {
     const stored = parseSystemStatus(await env.ANTITHEFT_STATE.get("system_status"));
     stored[STATUS_CMDS[body]] = (body === "ARM" || body === "IMMOBILIZE");
-    stored.ts = Date.now();
+    stored.ts = writeTs;
     await env.ANTITHEFT_STATE.put("system_status", JSON.stringify(stored));
   }
 
-  return corsJson({ status: "queued", command: body, id });
+  return corsJson({ status: "queued", command: body, id, writeTs });
 }
 
 function twiml(message) {

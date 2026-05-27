@@ -521,6 +521,11 @@ function handleNotification(msg, historical) {
     updateSpeedPill();
     updateImmobilizeButton();
     if (suLat !== null && suLon !== null) updateMapPosition(suLat, suLon);
+    // Status-push with coords clears a pending GPS command
+    if (!historical && pendingCmd && pendingCmd.cmd === 'GPS' && suLat !== null && suLon !== null) {
+      console.log('[CmdClear] GPS cleared by status-push coords:', suLat, suLon);
+      confirmCommand();
+    }
     if (motionState === 'STATIONARY') dismissSafetyLockout();
     return;
   }
@@ -534,25 +539,51 @@ function handleNotification(msg, historical) {
   var bodyLower = body.toLowerCase();
   if (bodyLower.indexOf('disarmed') >= 0) {
     updateStatus('DISARMED');
-    if (!historical && pendingCmd && pendingCmd.cmd === 'DISARM') confirmCommand();
   } else if (bodyLower.indexOf('armed') >= 0) {
     updateStatus('ARMED');
-    if (!historical && pendingCmd && pendingCmd.cmd === 'ARM') confirmCommand();
   }
 
   // Ignition state detection
   if (bodyLower.indexOf('immobilized') >= 0) {
     updateIgnition(true);
-    if (!historical && pendingCmd && pendingCmd.cmd === 'IMMOBILIZE') confirmCommand();
   }
   if (bodyLower.indexOf('ignition restored') >= 0 || bodyLower.indexOf('ignition_ok') >= 0 || bodyLower.indexOf('ignition: ok') >= 0) {
     updateIgnition(false);
-    if (!historical && pendingCmd && pendingCmd.cmd === 'RESTORE') confirmCommand();
   }
 
-  if (!historical) {
-    if (pendingCmd && pendingCmd.cmd === 'GPS' && body.indexOf('Location:') >= 0) confirmCommand();
-    if (pendingCmd && pendingCmd.cmd === 'PHOTO' && (attachment || body.indexOf('Photo') >= 0)) confirmCommand();
+  // --- Reply-gated pending-command clearing ---
+  // Lenient on body, strict on kind. Log every match for debugging.
+  if (!historical && pendingCmd) {
+    var matched = false;
+    if (pendingCmd.cmd === 'GPS') {
+      // GPS reply: "SMS_REPLY: GPS:..." or any message with "Location:" or status-push coords
+      if (body.indexOf('Location:') >= 0 || body.indexOf('SMS_REPLY: GPS:') >= 0) {
+        console.log('[CmdClear] GPS cleared by SSE body:', body.slice(0, 120));
+        matched = true;
+      }
+    }
+    if (pendingCmd.cmd === 'PHOTO') {
+      // Photo reply: any attachment or "SMS_REPLY:" mentioning photo
+      if (attachment || body.indexOf('Photo') >= 0 || (body.indexOf('SMS_REPLY:') >= 0 && body.toLowerCase().indexOf('photo') >= 0)) {
+        console.log('[CmdClear] PHOTO cleared by SSE body:', body.slice(0, 120), 'attachment:', !!attachment);
+        matched = true;
+      }
+    }
+    if (pendingCmd.cmd === 'STATUS') {
+      if (body.indexOf('SMS_REPLY:') >= 0 || bodyLower.indexOf('armed') >= 0 || bodyLower.indexOf('disarmed') >= 0) {
+        console.log('[CmdClear] STATUS cleared by SSE body:', body.slice(0, 120));
+        matched = true;
+      }
+    }
+    if (pendingCmd.cmd === 'ARM' && bodyLower.indexOf('armed') >= 0 && bodyLower.indexOf('disarmed') < 0) {
+      console.log('[CmdClear] ARM cleared by SSE body:', body.slice(0, 120));
+      matched = true;
+    }
+    if (pendingCmd.cmd === 'DISARM' && bodyLower.indexOf('disarmed') >= 0) {
+      console.log('[CmdClear] DISARM cleared by SSE body:', body.slice(0, 120));
+      matched = true;
+    }
+    if (matched) confirmCommand();
   }
 
   const locMatch = body.match(/Location:\s*([-\d.]+),([-\d.]+)/);
@@ -1025,8 +1056,8 @@ async function sendCommand(cmd, btn) {
     return;
   }
 
-  // GPS/PHOTO: wait for SSE confirmation or timeout
-  pendingCmd.timer = setTimeout(function() { markCommandFailed('No response'); }, 30000);
+  // GPS/PHOTO/STATUS: wait for SSE confirmation or timeout (60s to account for KV cache lag)
+  pendingCmd.timer = setTimeout(function() { markCommandFailed('No response'); }, 60000);
 }
 
 function markCommandFailed(reason) {
