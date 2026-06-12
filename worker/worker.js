@@ -21,12 +21,23 @@
  *   NTFY_TOPIC, ANALYZE_URL (Vercel /api/analyze endpoint)
  *   CMD_SECRET — shared secret for authenticating dashboard and LILYGO /ingest
  *   DEVICE_POLL_TOKEN — bearer token for LILYGO /commands/poll authentication
+ *   VAPID_PRIVATE_KEY — P-256 private scalar (base64url) for Web Push VAPID
+ *
+ * Web Push path (user-facing channel, in ADDITION to WhatsApp):
+ *   Dashboard PWA → POST /push/subscribe → KV push_sub:<sha256(endpoint)>
+ *   Alerts (ingest + cron) → sendWebPushToAll → push services (RFC 8291/8292)
  *
  * KV namespace binding: ANTITHEFT_STATE
  */
 
 const VALID_COMMANDS = ["ARM", "DISARM", "STATUS", "PHOTO", "GPS", "HELP", "IMMOBILIZE", "RESTORE"];
 const OWNER_LAST10 = "6093589220";
+
+// ── Web Push (RFC 8291 aes128gcm + RFC 8292 VAPID) ───────────
+// Private key (P-256 scalar, base64url) lives in the VAPID_PRIVATE_KEY secret.
+const VAPID_PUBLIC_KEY = "BAEaWU5rTz4gL4Ksprzmr3VLWWEFR4cr9ZfZkmbhuvQwT2WpM8PGjXeKCqIXH2chOpOe1WZgFTOuBCu6ZYKJ-sA";
+const VAPID_SUBJECT = "mailto:gonnie2219@gmail.com";
+const DASHBOARD_URL = "https://webapp-seven-livid-86.vercel.app/";
 
 // Verify Bearer token or X-CMD-Secret header against the CMD_SECRET env var.
 // Used to authenticate dashboard /commands/dispatch and LILYGO /ingest.
@@ -75,8 +86,19 @@ export default {
       return handleStatusPoll(env);
     }
 
+    // Web Push: subscription management + test send (CMD_SECRET auth)
+    if (request.method === "POST" && url.pathname === "/push/subscribe") {
+      return handlePushSubscribe(request, env);
+    }
+    if (request.method === "POST" && url.pathname === "/push/unsubscribe") {
+      return handlePushUnsubscribe(request, env);
+    }
+    if (request.method === "POST" && url.pathname === "/push/test") {
+      return handlePushTest(request, env);
+    }
+
     // CORS preflight for dashboard cross-origin requests
-    if (request.method === "OPTIONS" && (url.pathname.startsWith("/commands/") || url.pathname === "/status")) {
+    if (request.method === "OPTIONS" && (url.pathname.startsWith("/commands/") || url.pathname.startsWith("/push/") || url.pathname === "/status")) {
       return new Response(null, {
         headers: {
           "Access-Control-Allow-Origin": "*",
@@ -98,13 +120,209 @@ export default {
 
 // Parse dedup value: handles legacy "1" and new JSON format
 function parseDedup(raw) {
-  if (!raw) return { whatsapp: false, sms: false };
-  if (raw === "1") return { whatsapp: true, sms: true }; // legacy: fully delivered
+  if (!raw) return { whatsapp: false, sms: false, push: false };
+  if (raw === "1") return { whatsapp: true, sms: true, push: true }; // legacy: fully delivered
   try {
     return JSON.parse(raw);
   } catch {
-    return { whatsapp: false, sms: false };
+    return { whatsapp: false, sms: false, push: false };
   }
+}
+
+// ── Web Push engine ──────────────────────────────────────────
+function b64urlDecode(s) {
+  s = s.replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+}
+
+function b64urlEncode(buf) {
+  return btoa(String.fromCharCode(...new Uint8Array(buf)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function sha256Hex(s) {
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// VAPID JWT (ES256) — RFC 8292
+async function vapidAuthHeader(env, endpoint) {
+  const pub = b64urlDecode(VAPID_PUBLIC_KEY); // 65-byte uncompressed point
+  const jwk = {
+    kty: "EC", crv: "P-256",
+    x: b64urlEncode(pub.slice(1, 33)),
+    y: b64urlEncode(pub.slice(33, 65)),
+    d: env.VAPID_PRIVATE_KEY,
+  };
+  const key = await crypto.subtle.importKey(
+    "jwk", jwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]
+  );
+  const enc = new TextEncoder();
+  const header = b64urlEncode(enc.encode(JSON.stringify({ typ: "JWT", alg: "ES256" })));
+  const claims = b64urlEncode(enc.encode(JSON.stringify({
+    aud: new URL(endpoint).origin,
+    exp: Math.floor(Date.now() / 1000) + 12 * 3600,
+    sub: VAPID_SUBJECT,
+  })));
+  const unsigned = `${header}.${claims}`;
+  // WebCrypto ECDSA emits raw r||s — exactly what JWS ES256 requires
+  const sig = await crypto.subtle.sign(
+    { name: "ECDSA", hash: "SHA-256" }, key, enc.encode(unsigned)
+  );
+  return `vapid t=${unsigned}.${b64urlEncode(sig)}, k=${VAPID_PUBLIC_KEY}`;
+}
+
+async function hkdf(salt, ikm, info, length) {
+  const key = await crypto.subtle.importKey("raw", ikm, "HKDF", false, ["deriveBits"]);
+  return new Uint8Array(
+    await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt, info }, key, length * 8)
+  );
+}
+
+// RFC 8291 aes128gcm payload encryption
+async function encryptPushPayload(sub, payloadStr) {
+  const uaPub = b64urlDecode(sub.keys.p256dh);    // client public key (65B)
+  const authSecret = b64urlDecode(sub.keys.auth); // client auth secret (16B)
+
+  const asKeys = await crypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]
+  );
+  const asPub = new Uint8Array(await crypto.subtle.exportKey("raw", asKeys.publicKey));
+  const uaKey = await crypto.subtle.importKey(
+    "raw", uaPub, { name: "ECDH", namedCurve: "P-256" }, false, []
+  );
+  const ecdhSecret = new Uint8Array(
+    await crypto.subtle.deriveBits({ name: "ECDH", public: uaKey }, asKeys.privateKey, 256)
+  );
+
+  const enc = new TextEncoder();
+  const keyInfo = new Uint8Array([...enc.encode("WebPush: info\0"), ...uaPub, ...asPub]);
+  const ikm = await hkdf(authSecret, ecdhSecret, keyInfo, 32);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const cek = await hkdf(salt, ikm, enc.encode("Content-Encoding: aes128gcm\0"), 16);
+  const nonce = await hkdf(salt, ikm, enc.encode("Content-Encoding: nonce\0"), 12);
+
+  // Single record: payload || 0x02 (last-record delimiter)
+  const plaintext = new Uint8Array([...enc.encode(payloadStr), 2]);
+  const aesKey = await crypto.subtle.importKey("raw", cek, "AES-GCM", false, ["encrypt"]);
+  const ciphertext = new Uint8Array(
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, aesKey, plaintext)
+  );
+
+  // Body: salt(16) | record size(4) | keyid len(1) | as_public(65) | ciphertext
+  const body = new Uint8Array(86 + ciphertext.length);
+  body.set(salt, 0);
+  new DataView(body.buffer).setUint32(16, 4096);
+  body[20] = 65;
+  body.set(asPub, 21);
+  body.set(ciphertext, 86);
+  return body;
+}
+
+// Send one push; returns HTTP status from the push service
+async function sendWebPush(env, sub, payloadStr) {
+  const body = await encryptPushPayload(sub, payloadStr);
+  const resp = await fetch(sub.endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: await vapidAuthHeader(env, sub.endpoint),
+      "Content-Encoding": "aes128gcm",
+      "Content-Type": "application/octet-stream",
+      TTL: "3600",
+      Urgency: "high",
+    },
+    body,
+  });
+  return resp.status;
+}
+
+// Fan a notification out to every stored subscription; prune dead ones
+async function sendWebPushToAll(env, title, msgBody, url) {
+  if (!env.VAPID_PRIVATE_KEY) return 0;
+  const payload = JSON.stringify({ title, body: msgBody, url, tag: "antitheft-alert" });
+  const list = await env.ANTITHEFT_STATE.list({ prefix: "push_sub:" });
+  let sent = 0;
+  for (const key of list.keys) {
+    try {
+      const raw = await env.ANTITHEFT_STATE.get(key.name);
+      if (!raw) continue;
+      const status = await sendWebPush(env, JSON.parse(raw), payload);
+      if (status === 404 || status === 410) {
+        await env.ANTITHEFT_STATE.delete(key.name);
+        console.log(`[push] pruned dead subscription ${key.name}`);
+      } else if (status >= 400) {
+        console.error(`[push] send failed (${status}) for ${key.name}`);
+      } else {
+        sent++;
+      }
+    } catch (err) {
+      console.error(`[push] error for ${key.name}: ${err.message}`);
+    }
+  }
+  return sent;
+}
+
+// Extract reason / location / maps URL from an ALERT body for push payloads
+function parseAlertParts(body) {
+  let reason = "Unknown", location = "", mapsUrl = "";
+  for (const line of body.split("\n")) {
+    const a = line.match(/^ALERT:\s*(.+)/);
+    if (a) reason = a[1].trim();
+    const l = line.match(/^Location:\s*([-\d.]+,[-\d.]+)/);
+    if (l) location = l[1];
+    const u = line.match(/(https:\/\/maps\.google\.com\/[^\s]+)/);
+    if (u) mapsUrl = u[1];
+  }
+  return { reason, location, mapsUrl };
+}
+
+async function pushAlert(env, alertBody) {
+  const { reason, location, mapsUrl } = parseAlertParts(alertBody);
+  const body = location ? `${reason} @ ${location}` : reason;
+  return sendWebPushToAll(env, "🚨 Anti-Theft ALERT", body, mapsUrl || DASHBOARD_URL);
+}
+
+// ── Web Push endpoint handlers ───────────────────────────────
+async function handlePushSubscribe(request, env) {
+  if (!checkCmdSecret(request, env)) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  let sub;
+  try { sub = await request.json(); } catch { return corsJson({ error: "Invalid JSON" }, 400); }
+  if (!sub || typeof sub.endpoint !== "string" || !sub.endpoint.startsWith("https://") ||
+      !sub.keys || typeof sub.keys.p256dh !== "string" || typeof sub.keys.auth !== "string") {
+    return corsJson({ error: "Invalid subscription" }, 400);
+  }
+  const key = `push_sub:${await sha256Hex(sub.endpoint)}`;
+  await env.ANTITHEFT_STATE.put(key, JSON.stringify({
+    endpoint: sub.endpoint,
+    keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth },
+  }));
+  return corsJson({ status: "subscribed" });
+}
+
+async function handlePushUnsubscribe(request, env) {
+  if (!checkCmdSecret(request, env)) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  let body;
+  try { body = await request.json(); } catch { return corsJson({ error: "Invalid JSON" }, 400); }
+  if (!body || typeof body.endpoint !== "string") {
+    return corsJson({ error: "Missing endpoint" }, 400);
+  }
+  await env.ANTITHEFT_STATE.delete(`push_sub:${await sha256Hex(body.endpoint)}`);
+  return corsJson({ status: "unsubscribed" });
+}
+
+async function handlePushTest(request, env) {
+  if (!checkCmdSecret(request, env)) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  const sent = await sendWebPushToAll(
+    env, "Anti-Theft Dashboard", "Test notification — Web Push is working.", DASHBOARD_URL
+  );
+  return corsJson({ status: "sent", delivered: sent });
 }
 
 // Content-hash dedup key shared by /ingest and cron paths
@@ -154,15 +372,24 @@ async function handleIngest(request, env) {
     console.log(smsOk ? "[ingest] SMS sent" : "[ingest] SMS failed");
   }
 
+  // Web Push fan-out (mirrors the WhatsApp fast path)
+  let pushSent = 0;
+  try {
+    pushSent = await pushAlert(env, body);
+    console.log(`[ingest] web push sent to ${pushSent} subscription(s)`);
+  } catch (err) {
+    console.error(`[ingest] web push failed: ${err.message}`);
+  }
+
   // Write dedup key so cron doesn't re-send the text alert.
   // Cron can still send a follow-up photo if one arrives.
   await env.ANTITHEFT_STATE.put(
     dedupKey,
-    JSON.stringify({ whatsapp: waOk, sms: smsOk, ingest: true }),
+    JSON.stringify({ whatsapp: waOk, sms: smsOk, push: true, ingest: true }),
     { expirationTtl: 86400 }
   );
 
-  return Response.json({ status: "ok", whatsapp: waOk, sms: smsOk });
+  return Response.json({ status: "ok", whatsapp: waOk, sms: smsOk, push: pushSent });
 }
 
 async function handleCron(env) {
@@ -209,7 +436,7 @@ async function _handleCron(env) {
   for (const alert of alerts) {
     const dedupKey = `msg:${alert.id}`;
     const dedup = parseDedup(await env.ANTITHEFT_STATE.get(dedupKey));
-    if (dedup.whatsapp && dedup.sms) {
+    if (dedup.whatsapp && dedup.sms && dedup.push) {
       console.log(`Skipping fully delivered: ${alert.id}`);
       continue;
     }
@@ -269,6 +496,21 @@ async function _handleCron(env) {
         }
       } else {
         dedup.sms = true; // mark delivered to avoid retry noise
+      }
+    }
+
+    // Web Push (skipped when /ingest already pushed this alert)
+    if (!dedup.push) {
+      if (ingestDedup.push) {
+        dedup.push = true;
+      } else {
+        try {
+          const sent = await pushAlert(env, alert.message || "");
+          console.log(`Web push for ${alert.id}: ${sent} subscription(s)`);
+        } catch (err) {
+          console.error(`Web push failed for ${alert.id}: ${err.message}`);
+        }
+        dedup.push = true; // best-effort: no retry loop on partial failures
       }
     }
 

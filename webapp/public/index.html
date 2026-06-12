@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Anti-Theft Dashboard</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔒</text></svg>">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#0b1120">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -213,6 +216,11 @@
     <span id="ignition-pill" class="status-pill pill-ign-ok">IGNITION OK</span>
     <span id="speed-pill" class="status-pill pill-speed-gray">&mdash; mph</span>
     <span id="last-seen" class="last-seen"></span>
+    <span id="push-controls" style="display:none;white-space:nowrap">
+      <button id="push-bell" onclick="togglePush()" style="background:none;border:1px solid #1e293b;border-radius:6px;color:#94a3b8;font-size:0.7rem;padding:0.25rem 0.5rem;cursor:pointer;font-family:inherit">🔔 Enable notifications</button>
+      <button id="push-test" onclick="sendPushTest()" style="display:none;background:none;border:1px solid #1e293b;border-radius:6px;color:#94a3b8;font-size:0.7rem;padding:0.25rem 0.5rem;cursor:pointer;font-family:inherit">Send test</button>
+    </span>
+    <span id="push-hint" style="display:none;font-size:0.7rem;color:#64748b;white-space:nowrap"></span>
     <a href="/opt-in" style="margin-left:auto;font-size:0.7rem;color:#64748b;text-decoration:none;white-space:nowrap" onmouseover="this.style.color='#0ea5e9'" onmouseout="this.style.color='#64748b'">SMS Opt-In</a>
   </div>
 
@@ -288,7 +296,16 @@
 const ALERT_TOPIC = 'antitheft-gonnie-2219';
 const WORKER_URL = 'https://antitheft-whatsapp-bridge.gonnie2219.workers.dev';
 const EXPECTED_HASH = '90508d9e1b28c32e484c03679d4939618ae1c31424a25a5f0483a93012be0a42';
+const VAPID_PUBLIC_KEY = 'BAEaWU5rTz4gL4Ksprzmr3VLWWEFR4cr9ZfZkmbhuvQwT2WpM8PGjXeKCqIXH2chOpOe1WZgFTOuBCu6ZYKJ-sA';
 var CMD_SECRET = ''; // set on login, sent with all command requests
+
+// Register the push-only service worker. try/catch keeps environments
+// without SW support (e.g. the Expo WebView) completely unaffected.
+try {
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js');
+  }
+} catch (e) { /* no service worker support — fine */ }
 
 // --- Auth ---
 document.getElementById('login-form').addEventListener('submit', async function(e) {
@@ -308,11 +325,114 @@ document.getElementById('login-form').addEventListener('submit', async function(
     document.getElementById('login').style.display = 'none';
     document.getElementById('dashboard').style.display = 'block';
     initDashboard();
+    initPushUI();
     setTimeout(function() { if (map) map.invalidateSize(); }, 200);
   } else {
     document.getElementById('login-error').style.display = 'block';
   }
 });
+
+// --- Web Push (PWA notifications) ---
+function urlBase64ToUint8Array(base64) {
+  var padding = '='.repeat((4 - (base64.length % 4)) % 4);
+  var raw = atob((base64 + padding).replace(/-/g, '+').replace(/_/g, '/'));
+  var arr = new Uint8Array(raw.length);
+  for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+
+function setPushHint(text) {
+  var hint = document.getElementById('push-hint');
+  hint.textContent = text;
+  hint.style.display = text ? 'inline' : 'none';
+}
+
+function setBellState(subscribed) {
+  var bell = document.getElementById('push-bell');
+  var test = document.getElementById('push-test');
+  bell.textContent = subscribed ? '🔔 Notifications on' : '🔔 Enable notifications';
+  bell.style.color = subscribed ? '#22c55e' : '#94a3b8';
+  test.style.display = subscribed ? 'inline-block' : 'none';
+}
+
+async function initPushUI() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    // iOS Safari exposes the Push API only inside an installed home-screen
+    // app — outside it, point the user at Add to Home Screen.
+    var isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+    var standalone = window.navigator.standalone === true ||
+      (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+    if (isIOS && !standalone) setPushHint('For push alerts: Share → Add to Home Screen, then open the app');
+    return;
+  }
+  document.getElementById('push-controls').style.display = 'inline';
+  try {
+    var reg = await navigator.serviceWorker.ready;
+    var sub = await reg.pushManager.getSubscription();
+    setBellState(!!sub);
+  } catch (e) {
+    setBellState(false);
+  }
+}
+
+async function togglePush() {
+  try {
+    var reg = await navigator.serviceWorker.ready;
+    var sub = await reg.pushManager.getSubscription();
+
+    if (sub) {
+      // Unsubscribe
+      await fetch(WORKER_URL + '/push/unsubscribe', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + CMD_SECRET, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ endpoint: sub.endpoint })
+      });
+      await sub.unsubscribe();
+      setBellState(false);
+      setPushHint('');
+      return;
+    }
+
+    // Subscribe — requestPermission must run inside this user gesture (iOS)
+    var perm = await Notification.requestPermission();
+    if (perm !== 'granted') {
+      setPushHint('Notifications blocked — re-enable in Settings > Notifications');
+      return;
+    }
+    sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+    });
+    var resp = await fetch(WORKER_URL + '/push/subscribe', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + CMD_SECRET, 'Content-Type': 'application/json' },
+      body: JSON.stringify(sub)
+    });
+    if (resp.ok) {
+      setBellState(true);
+      setPushHint('');
+    } else {
+      await sub.unsubscribe();
+      setPushHint('Subscribe failed (' + resp.status + ')');
+    }
+  } catch (e) {
+    setPushHint('Push setup failed: ' + e.message);
+  }
+}
+
+async function sendPushTest() {
+  try {
+    var resp = await fetch(WORKER_URL + '/push/test', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + CMD_SECRET }
+    });
+    var data = await resp.json();
+    setPushHint(resp.ok ? 'Test sent to ' + data.delivered + ' device(s)' : 'Test failed');
+    setTimeout(function() { setPushHint(''); }, 4000);
+  } catch (e) {
+    setPushHint('Test failed: ' + e.message);
+  }
+}
 
 // --- Dashboard ---
 let map, marker;
