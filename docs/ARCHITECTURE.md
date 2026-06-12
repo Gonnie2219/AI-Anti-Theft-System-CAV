@@ -31,10 +31,10 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
   - UART0 (Serial) = USB debug
   - UART1 (Serial1) = SIM7600 modem (TX=27 RX=26)
   - UART2 (Serial2, RX=21 TX=19) = Main ESP32
-- **Network:** Speedtalk SIM, APN "Wholesale", connects to ntfy.sh via SIM7600 built-in HTTP stack (AT+HTTPINIT/HTTPPARA/HTTPDATA/HTTPACTION)
-- **Network recovery:** `ensureNetwork()` checks AT+CREG? before each HTTP request and re-registers if cellular dropped
-- **Command polling:** Every 5s, polls `antitheft-gonnie-2219-cmd` topic for commands (ARM, DISARM, GPS, PHOTO). Sends `REMOTE_ARM`/`REMOTE_DISARM` to Main ESP32 or handles GPS/photo requests directly.
-- **SMS channel:** Sends outbound SMS alerts on alarm events (rate-limited to 10/hr). Receives inbound SMS commands (ARM, DISARM, STATUS, PHOTO, GPS, HELP) from whitelisted owner phone number. URC-based notification (`+CMTI:`) with 30-second safety-net poll (`AT+CMGL`).
+- **Network:** Hologram SIM, APN "hologram", IPv4 PDP. Connects to ntfy.sh via SIM7600 built-in HTTP stack (AT+HTTPINIT/HTTPPARA/HTTPDATA/HTTPACTION)
+- **Network recovery:** `ensureNetwork()` checks AT+CREG? (local AT command, no data cost) before every outbound HTTP request and re-attaches (CFUN=1 → CGATT=1 → CGACT=1,1) if cellular registration dropped. Logs "NETWORK: recovered" on success.
+- **Command polling:** Polls the Worker KV command queue (`/commands/poll` over HTTPS, Bearer `DEVICE_POLL_TOKEN`) — **adaptive cadence:** every 5 s while armed or within 10 min of boot / last command / last alert / last status change; every 30 s when idle. Logs "POLL: fast/slow" on transitions. Commands: ARM, DISARM, STATUS, PHOTO, GPS, IMMOBILIZE, RESTORE, HELP. Forwards ARM/DISARM/STATUS/PHOTO/IMMOBILIZE/RESTORE to Main ESP32 via `SMS_CMD:` UART message; handles GPS/HELP locally.
+- **SMS channel:** Native AT+CMGS path disabled (`USE_NATIVE_SMS=0`). Inbound SMS commands arrive via Twilio webhook → Worker → KV command queue; outbound replies are posted to ntfy ("Command Reply") for the Worker to forward.
 - **Notification types:**
   - ALERT with image: Two HTTP requests (text POST + image PUT) — Title: "Anti-Theft ALERT", Priority: urgent, Tags: rotating_light
   - Requested photo: Two HTTP requests — Title: "Requested Photo", Priority: default, Tags: camera
@@ -42,9 +42,8 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
   - STATUS: Arm/disarm notifications (low priority)
   - Command ack: Title: "Command Acknowledged", Priority: low, Tags: white_check_mark
   - GPS response: Title: "GPS Location", Priority: low, Tags: round_pushpin
-  - Heartbeat: Every 2 minutes
-  - SMS alert: Outbound SMS on alarm events (not photo requests) — includes reason, timestamp, GPS link, ntfy photo link
-  - SMS reply: Response to inbound SMS commands (ARM/DISARM confirmation, status, photo link, GPS location)
+  - Heartbeat: Every 5 minutes; includes battery level from AT+CBC as "Battery: NN% (V.VVV)"
+  - SMS reply: Posted to ntfy with Title "Command Reply"; Worker forwards as SMS (native outbound SMS disabled)
 - **GPS:** Polled every 30s via AT+CGPSINFO, included in notifications
 
 ## Inter-Board Protocol (UART, 115200 baud)
@@ -64,9 +63,9 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
 | `LILYGO_READY` | Boot complete |
 | `LILYGO_OK: ...` | Notification sent successfully |
 | `LILYGO_ERROR` | Notification failed |
-| `REMOTE_ARM` | Remote arm command (from web dashboard via ntfy command topic) |
-| `REMOTE_DISARM` | Remote disarm command (from web dashboard via ntfy command topic) |
-| `REQUEST_PHOTO` | Photo request (from web dashboard via ntfy command topic) |
+| `REMOTE_ARM` | Remote arm command (from web dashboard via Worker KV command queue) |
+| `REMOTE_DISARM` | Remote disarm command (from web dashboard via Worker KV command queue) |
+| `REQUEST_PHOTO` | Photo request (from web dashboard via Worker KV command queue) |
 | `SMS_CMD:ARM` | Arm command (from inbound SMS) |
 | `SMS_CMD:DISARM` | Disarm command (from inbound SMS) |
 | `SMS_CMD:STATUS` | Status request (from inbound SMS) |
@@ -90,9 +89,9 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
 - **Live URL:** https://webapp-seven-livid-86.vercel.app
 - **Deployment:** Vercel — `webapp/` is the project root, `public/` is the static output directory, `api/` contains serverless functions
 - **Auth:** Client-side SHA-256 hash of username:password
-- **Commands:** POSTs command text (ARM, DISARM, GPS, PHOTO) to `antitheft-gonnie-2219-cmd` ntfy topic. Buttons have Unicode icons and show toast notification on success.
+- **Commands:** POSTs commands (ARM, DISARM, GPS, PHOTO, IMMOBILIZE, RESTORE) to the Worker `/commands/dispatch` endpoint (CMD_SECRET auth), which queues them in KV for the LILYGO to poll. Buttons have Unicode icons and show toast notification on success.
 - **Live feed:** SSE subscription to `antitheft-gonnie-2219` alert topic for real-time notifications. Feed is capped at 50 items. Slide-in animation on new items. SSE reconnect indicator on connection drop.
-- **Battery monitoring:** Color-coded widget (green ≥60%, yellow ≥30%, red <30%) parsed from AT+CBC voltage-based estimation in notification bodies.
+- **Battery info:** No dedicated widget — heartbeat notifications carry a "Battery: NN% (V.VVV)" line (AT+CBC on LILYGO) that displays as plain text in the live feed.
 - **Online/offline detection:** Tracks `lastMessageTime`. After 3 minutes of silence, shows "SYSTEM OFFLINE" with last-known status and minutes since last seen. Checked every 30 seconds.
 - **localStorage persistence:** Saves and restores: armed/disarmed status, battery level, GPS coordinates, and last message timestamp across page refreshes.
 - **AI threat classification:** When a photo attachment arrives (title contains "Photo Evidence" or filename is `alert.jpg`), the dashboard POSTs the image URL to `/api/analyze` (Vercel serverless function). The function uses the Anthropic Claude Vision API to classify the image as HIGH/MEDIUM/LOW threat with a text verdict. Result is displayed as a color-coded badge on the feed item.
@@ -109,6 +108,14 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
 - **Output:** JSON `{ threatLevel: "HIGH"|"MEDIUM"|"LOW", verdict: "..." }`
 - **Auth:** Uses `ANTHROPIC_API_KEY` environment variable (set in Vercel project settings)
 
+### PWA + Web Push Notifications
+- **Installable PWA:** `manifest.json` (name "Anti-Theft Dashboard", `display: standalone`, dark theme) + `icon-192/512.png` + `apple-touch-icon.png`. On iPhone: Safari Share → Add to Home Screen (iOS 16.4+ required for push).
+- **Service worker (`webapp/public/sw.js`):** push-only — `push` shows the notification, `notificationclick` focuses/opens the dashboard. Deliberately NO caching/offline/fetch interception, so SSE and future deploys are unaffected.
+- **Subscribe flow:** after login a 🔔 bell appears when the Push API exists (on iOS that's only inside the installed home-screen app; the Expo WebView never shows it). Tap → `Notification.requestPermission()` → `pushManager.subscribe()` with the VAPID public key → POST subscription to Worker `/push/subscribe`. All `/push/*` endpoints require CMD_SECRET auth (alerts contain GPS, so subscribe is not open). "Send test" hits `/push/test`; `/push/unsubscribe` removes a subscription.
+- **Worker fan-out (`worker/worker.js`):** at both alert trigger points — the `/ingest` fast path and the ntfy cron loop — the Worker calls `sendWebPushToAll()`: a pure-WebCrypto implementation of VAPID ES256 JWT (RFC 8292) + aes128gcm payload encryption (RFC 8291), because npm `web-push` does not run on Cloudflare Workers. Subscriptions are stored in KV as `push_sub:<sha256(endpoint)>`; a 404/410 from the push service prunes the entry. TTL 3600. A `push` flag in the existing per-alert dedup JSON prevents double sends between ingest and cron.
+- **Keys:** VAPID public key is a constant in `worker.js` and `index.html`; the private key is the `VAPID_PRIVATE_KEY` Wrangler secret (subject `mailto:gonnie2219@gmail.com`).
+- Web Push is an ADDITIONAL user-facing channel — ntfy stays the hardware→cloud transport, and WhatsApp delivery is unchanged.
+
 ## Key Parameters
 | Parameter | Value | Location |
 |-----------|-------|----------|
@@ -118,9 +125,7 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
 | CAM serial RX buffer | 2048 bytes | ESP32Main |
 | Image receive timeout | 30s (outer), 15s (inner) | LILYGO |
 | LILYGO response timeout | 90s | ESP32Main |
-| Heartbeat interval | 2 minutes | LILYGO |
-| Command poll interval | 5000ms | LILYGO |
+| Heartbeat interval | 5 minutes | LILYGO |
+| Command poll interval | adaptive: 5 s (armed/active) / 30 s (idle), 10 min activity window | LILYGO |
 | ntfy alert topic | antitheft-gonnie-2219 | LILYGO |
-| ntfy command topic | antitheft-gonnie-2219-cmd | LILYGO + Web Dashboard |
-| SMS rate limit | 10/hour | LILYGO |
-| SMS safety-net poll | 30s | LILYGO |
+| Command queue | Worker KV via `/commands/poll` (Bearer DEVICE_POLL_TOKEN) | LILYGO + Worker |

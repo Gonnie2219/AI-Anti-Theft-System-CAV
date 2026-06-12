@@ -45,7 +45,12 @@ const char    OWNER_PHONE[]    = "+16093589220";
 #define HEARTBEAT_MS      300000UL     // 5 minutes
 #define GPS_UPDATE_MS     300000UL     // 5 minutes
 #define WORKER_CMD_POLL_URL "https://antitheft-whatsapp-bridge.gonnie2219.workers.dev/commands/poll"
-#define CMD_POLL_MS         5000UL     // 5 seconds
+// Adaptive command-poll cadence: fast while armed or recently active,
+// slow when idle — each poll costs a full TLS handshake (~5 KB) on
+// pay-per-MB cellular, so idle polling is the dominant data cost.
+#define CMD_POLL_FAST_MS      5000UL   // armed OR recent activity
+#define CMD_POLL_SLOW_MS     30000UL   // idle
+#define POLL_ACTIVE_WINDOW_MS 600000UL // 10 min "recent activity" window
 #define WORKER_INGEST_URL  "https://antitheft-whatsapp-bridge.gonnie2219.workers.dev/ingest"
 
 // Shared secret for authenticating with Worker endpoints.
@@ -93,6 +98,11 @@ Preferences   preferences;
 String        lastCmdId;
 unsigned long lastCmdPoll   = 0;
 
+// Adaptive poll state — fast within POLL_ACTIVE_WINDOW_MS of boot, last
+// received command, last ALERT, or last STATUS change; also while armed.
+unsigned long lastActivityMs = 0;
+bool          pollFast       = true;
+
 #if USE_NATIVE_SMS
 unsigned long lastSMSPoll   = 0;
 int           smsCount      = 0;
@@ -113,6 +123,41 @@ String sendAT(String cmd, String expect, unsigned long timeout) {
     delay(10);
   }
   return resp;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Network watchdog — verify registration before HTTP traffic
+// ─────────────────────────────────────────────────────────────
+// AT+CREG? is a local modem query (no data cost). If registration was
+// lost (parking garage, tower handoff), re-attach before the request.
+// Called from httpInit(), the single chokepoint for ALL outbound HTTP
+// (ntfy posts and Worker poll/ingest alike).
+bool ensureNetwork() {
+  String r = sendAT("AT+CREG?", "OK", 2000);
+  if (r.indexOf(",1") >= 0 || r.indexOf(",5") >= 0) {
+    if (!networkReady) {
+      networkReady = true;
+      SerialMon.println("NETWORK: recovered");
+    }
+    return true;
+  }
+
+  SerialMon.println("[NET] not registered - re-attaching...");
+  networkReady = false;
+  sendAT("AT+CFUN=1", "OK", 15000);   // no-op if already full-function
+  for (int i = 0; i < 10; i++) {
+    delay(2000);
+    r = sendAT("AT+CREG?", "OK", 2000);
+    if (r.indexOf(",1") >= 0 || r.indexOf(",5") >= 0) {
+      sendAT("AT+CGATT=1", "OK", 10000);   // packet-switched attach
+      sendAT("AT+CGACT=1,1", "OK", 10000); // re-activate PDP context
+      networkReady = true;
+      SerialMon.println("NETWORK: recovered");
+      return true;
+    }
+  }
+  SerialMon.println("[NET] re-attach failed");
+  return false;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -178,6 +223,8 @@ static bool waitOK(unsigned long timeout) {
 }
 
 static bool httpInit(String url, String contentType, String headers) {
+  if (!ensureNetwork()) return false;
+
   if (sendAT("AT+HTTPTERM", "OK", 1000).indexOf("OK") >= 0) {
     // ok, was active, now closed
   }
@@ -430,6 +477,8 @@ void pollWorkerCommands() {
     searchPos = cmdEnd + 1;
   }
 
+  if (hadCommands) lastActivityMs = millis();  // user activity → stay on fast poll
+
   // Advance cursor — only persist to NVS when commands were actually
   // received.  The Worker returns Date.now() as latestId even for empty
   // queues, which would cause a flash write every poll cycle (every 5s).
@@ -501,6 +550,45 @@ void updateGPS() {
   SerialMon.println("[GPS] speed: " + String(gpsSpeedKnots, 2) + " kn / " +
                     String(gpsSpeedMph, 1) + " mph / " + String(gpsSpeedKmh, 1) + " km/h");
   SerialMain.println("GPS_SPEED:" + String(gpsSpeedMph, 1));
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Battery (AT+CBC — local query, no data cost)
+// ─────────────────────────────────────────────────────────────
+// SIM7600 replies "+CBC: 3.912V". Older SIMCom firmwares reply
+// "+CBC: <charging>,<percent>,<millivolts>". Handle both, and estimate
+// percent from voltage when the modem doesn't report one
+// (Li-ion: 3.40 V = 0 %, 4.20 V = 100 %, linear).
+String getBatteryStatus() {
+  String r = sendAT("AT+CBC", "OK", 2000);
+  int i = r.indexOf("+CBC:");
+  if (i < 0) return "";
+  int eol = r.indexOf('\n', i);
+  String line = (eol > i) ? r.substring(i + 5, eol) : r.substring(i + 5);
+  line.trim();
+
+  float volts = -1.0;
+  int   pct   = -1;
+  int c1 = line.indexOf(',');
+  if (c1 >= 0) {
+    int c2 = line.indexOf(',', c1 + 1);
+    pct = line.substring(c1 + 1, (c2 > 0) ? c2 : (int)line.length()).toInt();
+    if (c2 > 0) volts = line.substring(c2 + 1).toFloat() / 1000.0;
+  } else {
+    line.replace("V", "");
+    volts = line.toFloat();
+  }
+
+  if (pct < 0 && volts > 0) {
+    pct = (int)((volts - 3.40) / 0.80 * 100.0);
+    if (pct < 0)   pct = 0;
+    if (pct > 100) pct = 100;
+  }
+  if (pct < 0 && volts <= 0) return "";
+
+  String s = "Battery: " + String(pct) + "%";
+  if (volts > 0) s += " (" + String(volts, 2) + "V)";
+  return s;
 }
 
 String getModemTime() {
@@ -684,6 +772,8 @@ bool receiveImage() {
 void handleAlert(String reason) {
   alarmInProgress = true;
   bool isPhotoRequest = (reason == "Photo Requested");
+  if (!isPhotoRequest) systemArmed = true;  // an alarm can only fire while armed
+  lastActivityMs = millis();
   SerialMon.println(isPhotoRequest ? "\n[PHOTO_REQ]" : "\n[ALERT] " + reason);
   digitalWrite(LED_PIN, HIGH);
 
@@ -752,6 +842,7 @@ void handleAlert(String reason) {
 
 void handleStatus(String status) {
   systemArmed = (status == "ARMED");
+  lastActivityMs = millis();
   SerialMon.println("[STATUS] " + status);
 
   String body = "System " + status;
@@ -774,6 +865,8 @@ void sendHeartbeat() {
   if (gpsLat.length() > 0) body += "\nLocation: " + gpsLat + "," + gpsLon;
   if (gpsSpeedMph >= 0.0)  body += "\nSpeed: " + String(gpsSpeedMph, 1) + " mph";
   body += "\nMotion: " + motionState;
+  String batt = getBatteryStatus();
+  if (batt.length() > 0)   body += "\n" + batt;
 
   httpPostText(NTFY_TOPIC, "Title: Heartbeat\r\nPriority: min\r\nTags: green_circle", body);
 }
@@ -955,6 +1048,9 @@ void setup() {
   lastCmdPoll      = millis();
   lastGPS          = millis();
   lastStatusPushMs = millis();
+  lastActivityMs   = millis();   // boot counts as activity
+  pollFast         = true;
+  SerialMon.println("POLL: fast (boot)");
 #if USE_NATIVE_SMS
   lastSMSPoll   = millis();
 #endif
@@ -1011,7 +1107,14 @@ void loop() {
   unsigned long now = millis();
 
   // 3) Poll Worker command queue (SMS / Dashboard → Worker KV → here)
-  if (now - lastCmdPoll > CMD_POLL_MS) {
+  //    Adaptive cadence: 5 s while armed or recently active, 30 s idle.
+  bool wantFast = systemArmed || (now - lastActivityMs < POLL_ACTIVE_WINDOW_MS);
+  if (wantFast != pollFast) {
+    pollFast = wantFast;
+    if (pollFast) SerialMon.println(systemArmed ? "POLL: fast (armed)" : "POLL: fast (recent activity)");
+    else          SerialMon.println("POLL: slow (idle)");
+  }
+  if (now - lastCmdPoll > (pollFast ? CMD_POLL_FAST_MS : CMD_POLL_SLOW_MS)) {
     pollWorkerCommands();
     lastCmdPoll = now;
   }
