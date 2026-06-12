@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import {
   ActivityIndicator,
+  Linking,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -14,7 +15,8 @@ import { StatusBar } from 'expo-status-bar';
 import { WebView } from 'react-native-webview';
 import * as SecureStore from 'expo-secure-store';
 
-const DASHBOARD_URL = 'https://webapp-seven-livid-86.vercel.app';
+const DASHBOARD_ORIGIN = 'https://webapp-seven-livid-86.vercel.app';
+const DASHBOARD_URL = DASHBOARD_ORIGIN;
 const STORE_KEY_USER = 'dashboard_username';
 const STORE_KEY_PASS = 'dashboard_password';
 
@@ -25,6 +27,8 @@ const STORE_KEY_PASS = 'dashboard_password';
 function buildAutoLoginScript(username, password) {
   return `
 (function() {
+  // Never inject credentials into any page that isn't the dashboard origin.
+  if (window.location.origin !== ${JSON.stringify(DASHBOARD_ORIGIN)}) return;
   var USER = ${JSON.stringify(username)};
   var PASS = ${JSON.stringify(password)};
   function notify(msg) {
@@ -122,6 +126,23 @@ export default function App() {
     webViewRef.current?.reload();
   }, []);
 
+  // External links (e.g. "View on Google Maps") open in the system browser.
+  // Only top-level navigations are intercepted — dashboard pages, iframes and
+  // subframe loads stay inside the WebView. (isTopFrame is iOS-only; Android
+  // only fires this for top-level navigations.)
+  const onShouldStartLoadWithRequest = useCallback((request) => {
+    if (request.isTopFrame === false) return true;
+    if (
+      request.url === DASHBOARD_ORIGIN ||
+      request.url.startsWith(DASHBOARD_ORIGIN + '/') ||
+      request.url.startsWith('about:')
+    ) {
+      return true;
+    }
+    Linking.openURL(request.url).catch(() => {});
+    return false;
+  }, []);
+
   if (!storeChecked) {
     return (
       <SafeAreaProvider>
@@ -201,6 +222,7 @@ export default function App() {
               credentials.password
             )}
             onMessage={onMessage}
+            onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
             onLoadEnd={() => {
               setLoading(false);
               setRefreshing(false);
