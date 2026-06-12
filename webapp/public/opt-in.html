@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SMS Opt-In | Anti-Theft System</title>
+<title>SMS Opt-In | Gonnie Ben-Tal Anti-Theft</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔒</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -83,28 +83,16 @@
 </head>
 <body>
 <div class="container">
-  <h1>Anti-Theft System SMS Opt-In</h1>
-  <p class="intro">This is the consent form for receiving SMS alerts from the Anti-Theft System. This is a single owner-operator system — the registrant is also the sole SMS recipient. By completing this form you are consenting to receive automated SMS messages related to your personal anti-theft device.</p>
+  <h1>Gonnie Ben-Tal Anti-Theft SMS Opt-In</h1>
+  <p class="intro">Complete this form to consent to receiving automated SMS security alerts and status notifications from the Gonnie Ben-Tal Anti-Theft program.</p>
 
   <div class="form-card" id="form-card">
     <form id="opt-in-form" novalidate>
-      <label class="field-label" for="phone">Phone Number (E.164 format)</label>
+      <label class="field-label" for="phone">Mobile Phone Number (E.164 format)</label>
       <input type="tel" id="phone" name="phone" placeholder="+1XXXXXXXXXX" pattern="^\+[1-9]\d{9,14}$" required>
 
-      <p class="section-heading">Required to use the service</p>
       <div class="checkbox-group">
-        <label><input type="checkbox" id="cb-terms" required> I have read and agree to the <a href="/terms" target="_blank">Terms and Conditions</a>.</label>
-        <label><input type="checkbox" id="cb-privacy" required> I have read and agree to the <a href="/privacy" target="_blank">Privacy Policy</a>.</label>
-      </div>
-
-      <hr class="section-divider">
-
-      <div class="optional-section">
-        <p class="section-heading">Optional — SMS notifications</p>
-        <div class="checkbox-group">
-          <label><input type="checkbox" id="cb-sms"> I consent to receive SMS alerts from the Anti-Theft System at the phone number above. I understand that message and data rates may apply, and that I can reply STOP at any time to opt out.</label>
-        </div>
-        <p class="sms-helper">If you do not opt into SMS, your Anti-Theft System will still deliver alerts via WhatsApp, the live dashboard, and email.</p>
+        <label><input type="checkbox" id="cb-consent" required> I agree to receive automated SMS security alerts and status notifications from the Gonnie Ben-Tal Anti-Theft program at the mobile number I provided. Message and data rates may apply. Message frequency varies and depends on vehicle activity. Reply HELP for help, STOP to cancel.</label>
       </div>
 
       <button type="submit" id="submit-btn" disabled>Submit Consent</button>
@@ -112,7 +100,7 @@
     </form>
 
     <div class="disclosure">
-      <p>Message frequency: 0&ndash;2 messages per week during normal operation, plus event-driven alerts when device sensors detect intrusion attempts.</p>
+      <p>Message frequency varies and depends on vehicle activity.</p>
       <p>Message and data rates may apply.</p>
       <p>Reply <strong>STOP</strong> to opt out at any time.</p>
       <p>Reply <strong>HELP</strong> for help, or contact gonnie2219@gmail.com.</p>
@@ -130,20 +118,15 @@
   var phone = document.getElementById('phone');
   var btn = document.getElementById('submit-btn');
   var errorMsg = document.getElementById('error-msg');
-  var cbTerms = document.getElementById('cb-terms');
-  var cbPrivacy = document.getElementById('cb-privacy');
-  var cbSms = document.getElementById('cb-sms');
+  var cbConsent = document.getElementById('cb-consent');
   var phonePattern = /^\+[1-9]\d{9,14}$/;
 
   function validate() {
     var phoneValid = phonePattern.test(phone.value.trim());
-    var requiredChecked = cbTerms.checked && cbPrivacy.checked;
-    btn.disabled = !(phoneValid && requiredChecked);
+    btn.disabled = !(phoneValid && cbConsent.checked);
   }
 
-  cbTerms.addEventListener('change', validate);
-  cbPrivacy.addEventListener('change', validate);
-  cbSms.addEventListener('change', validate);
+  cbConsent.addEventListener('change', validate);
   phone.addEventListener('input', validate);
 
   form.addEventListener('submit', async function(e) {
@@ -152,14 +135,13 @@
     btn.disabled = true;
     btn.textContent = 'Submitting...';
 
-    var smsConsent = cbSms.checked;
     var payload = {
       phone: phone.value.trim(),
       consents: {
-        terms: cbTerms.checked,
-        privacy: cbPrivacy.checked
+        terms: true,
+        privacy: true
       },
-      smsConsent: smsConsent,
+      smsConsent: true,
       userAgent: navigator.userAgent,
       timestamp: new Date().toISOString()
     };
@@ -174,16 +156,10 @@
       if (!resp.ok) throw new Error(data.error || 'Submission failed');
 
       var confirmHtml = '<div class="confirmation">' +
-        '<h2>Consent Recorded</h2>';
-
-      if (smsConsent) {
-        confirmHtml += '<p>Thank you. You have opted in to receive SMS alerts at ' +
-          phone.value.trim() + '. You may reply STOP at any time to opt out.</p>';
-      } else {
-        confirmHtml += '<p>Thank you. You did NOT opt in to SMS alerts. Your Anti-Theft System will continue to deliver alerts via WhatsApp, the live dashboard, and email. You can return to this page anytime to opt into SMS.</p>';
-      }
-
-      confirmHtml += '<p>Consent ID: <code>' + data.consentId + '</code></p>' +
+        '<h2>Consent Recorded</h2>' +
+        '<p>Thank you. You have opted in to receive SMS alerts at ' +
+        phone.value.trim() + '. You may reply STOP at any time to opt out.</p>' +
+        '<p>Consent ID: <code>' + data.consentId + '</code></p>' +
         '<p>Recorded at: ' + new Date(data.recordedAt).toLocaleString() + '</p>' +
         '</div>';
 

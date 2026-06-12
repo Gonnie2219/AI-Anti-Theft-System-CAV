@@ -38,6 +38,14 @@
 #define LED_GREEN       32
 #define LED_RED         33
 
+// Buzzer
+#define BUZZER_PIN      18
+
+// Local alarm pattern (buzzer + red LED)
+#define BEEP_COUNT      3
+#define BEEP_ON_MS      200
+#define BEEP_OFF_MS     150
+
 RCSwitch mySwitch = RCSwitch();
 #define CODE_ARM        616609
 #define CODE_DISARM     616610
@@ -120,6 +128,9 @@ void setup() {
   pinMode(LED_RED, OUTPUT);
   digitalWrite(LED_GREEN, LOW);
   digitalWrite(LED_RED, HIGH);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
 
   // Immobilization relay — persisted via NVS so state survives reboot
   preferences.begin("antitheft", false);
@@ -375,6 +386,29 @@ void startAlarm(String reason) {
   }
 }
 
+// ── Local Alarm (buzzer + red LED, 3x) ──────────────────────
+void soundLocalAlarm() {
+  for (int i = 0; i < BEEP_COUNT; i++) {
+    if (!armed) break;                 // stop instantly if disarmed mid-alarm
+    digitalWrite(BUZZER_PIN, HIGH);
+    digitalWrite(LED_RED, HIGH);
+    delay(BEEP_ON_MS);
+    digitalWrite(BUZZER_PIN, LOW);
+    digitalWrite(LED_RED, LOW);
+    delay(BEEP_OFF_MS);
+  }
+  digitalWrite(BUZZER_PIN, LOW);       // ensure buzzer is off
+
+  // Restore LEDs to match current armed state
+  if (armed) {
+    digitalWrite(LED_GREEN, HIGH);
+    digitalWrite(LED_RED, LOW);
+  } else {
+    digitalWrite(LED_GREEN, LOW);
+    digitalWrite(LED_RED, HIGH);
+  }
+}
+
 // ── Alarm Task (Core 0) — Runs in background ────────────────
 void alarmTask(void* param) {
   String reason = (char*)param;
@@ -384,6 +418,10 @@ void alarmTask(void* param) {
   xSemaphoreTake(lilygoMutex, portMAX_DELAY);
   SerialLilyGO.println("ALERT:" + reason);
   xSemaphoreGive(lilygoMutex);
+
+  // Step 1.5: Sound local alarm (buzzer + red LED, 3x)
+  Serial.println("Step 1.5: Sounding local alarm (buzzer + red LED)...");
+  soundLocalAlarm();
 
   Serial.println("  -> Requesting photo");
   Serial2.println("PHOTO");
