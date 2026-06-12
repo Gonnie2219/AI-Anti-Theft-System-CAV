@@ -53,6 +53,12 @@ const char    OWNER_PHONE[]    = "+16093589220";
 #define POLL_ACTIVE_WINDOW_MS 600000UL // 10 min "recent activity" window
 #define WORKER_INGEST_URL  "https://antitheft-whatsapp-bridge.gonnie2219.workers.dev/ingest"
 
+// Keep the modem HTTP(S) service initialized across requests instead of
+// HTTPTERM after every one — avoids a full TCP+TLS handshake (~5 KB, 2-4 s)
+// per request. Session is termed + re-inited only on error/timeout (one
+// retry) or when the URL scheme flips between http (ntfy) and https (Worker).
+#define USE_PERSISTENT_HTTP 1
+
 // Shared secret for authenticating with Worker endpoints.
 // See secrets.h.example — copy to secrets.h and fill in the real value.
 #include "secrets.h"
@@ -165,15 +171,28 @@ bool ensureNetwork() {
 // ─────────────────────────────────────────────────────────────
 //
 // The HTTPINIT subsystem is a separate network stack from NETOPEN/
-// CIPOPEN. Each request goes: HTTPTERM (cleanup) -> HTTPINIT ->
-// HTTPPARA (URL/content/headers) -> HTTPDATA (upload body) ->
-// HTTPACTION (execute) -> wait for +HTTPACTION URC -> HTTPTERM.
+// CIPOPEN. With USE_PERSISTENT_HTTP the service stays initialized across
+// requests: HTTPINIT once -> per request HTTPPARA (URL/content/headers) ->
+// HTTPDATA -> HTTPACTION -> wait URC. HTTPTERM only runs on error/timeout
+// (each request function retries once through a fresh init) or when the
+// URL scheme flips http<->https (AT+HTTPSSL must be set before HTTPINIT).
+// Note: HTTPPARA values (USERDATA etc.) persist within a session — every
+// caller sets its own headers, so stale values are always overwritten.
 //
 // ntfy.sh requests use HTTP (no TLS). The Worker endpoints (/ingest,
 // /commands/poll) use HTTPS — the SSL stack is configured once in
 // setup() via AT+CSSLCFG, and httpInit() toggles AT+HTTPSSL per URL.
 // Alert content and GPS coordinates sent to ntfy are cleartext.
 // Accepted trade-off — the ntfy topic name provides obscurity.
+
+// Persistent session state
+static bool httpSessionOpen = false;
+static bool httpSessionSsl  = false;
+
+static void httpTerm() {
+  sendAT("AT+HTTPTERM", "OK", 1000);
+  httpSessionOpen = false;
+}
 
 static int waitHttpAction(unsigned long timeout) {
   unsigned long start = millis();
@@ -223,21 +242,51 @@ static bool waitOK(unsigned long timeout) {
 }
 
 static bool httpInit(String url, String contentType, String headers) {
-  if (!ensureNetwork()) return false;
+  bool wasReady = networkReady;
+  if (!ensureNetwork()) {
+    if (httpSessionOpen) httpTerm();
+    return false;
+  }
+  // Network was re-attached — any kept-alive session is dead.
+  if (!wasReady && httpSessionOpen) httpTerm();
 
+  bool wantSsl = url.startsWith("https");
+
+#if USE_PERSISTENT_HTTP
+  // Reuse the open session when the SSL mode matches; AT+HTTPSSL must be
+  // set before HTTPINIT, so an http<->https switch forces a fresh init.
+  if (httpSessionOpen && wantSsl != httpSessionSsl) httpTerm();
+
+  if (!httpSessionOpen) {
+    sendAT("AT+HTTPTERM", "OK", 1000);  // clear any stray service
+    while (SerialAT.available()) SerialAT.read();
+    sendAT("AT+HTTPSSL=" + String(wantSsl ? 1 : 0), "OK", 2000);
+    String initResp = sendAT("AT+HTTPINIT", "OK", 5000);
+    if (initResp.indexOf("OK") < 0) {
+      SerialMon.println("[HTTP] HTTPINIT failed. Modem said: " + initResp);
+      return false;
+    }
+    httpSessionOpen = true;
+    httpSessionSsl  = wantSsl;
+  } else {
+    while (SerialAT.available()) SerialAT.read();
+  }
+#else
   if (sendAT("AT+HTTPTERM", "OK", 1000).indexOf("OK") >= 0) {
     // ok, was active, now closed
   }
   while (SerialAT.available()) SerialAT.read();
 
   // Toggle SSL based on URL scheme
-  sendAT("AT+HTTPSSL=" + String(url.startsWith("https") ? 1 : 0), "OK", 2000);
+  sendAT("AT+HTTPSSL=" + String(wantSsl ? 1 : 0), "OK", 2000);
 
   String initResp = sendAT("AT+HTTPINIT", "OK", 5000);
   if (initResp.indexOf("OK") < 0) {
     SerialMon.println("[HTTP] HTTPINIT failed. Modem said: " + initResp);
     return false;
   }
+#endif
+
   sendAT("AT+HTTPPARA=\"URL\",\"" + url + "\"", "OK", 3000);
   sendAT("AT+HTTPPARA=\"CONNECTTO\",30", "OK", 2000);
   sendAT("AT+HTTPPARA=\"RECVTO\",30", "OK", 2000);
@@ -253,27 +302,36 @@ static bool httpInit(String url, String contentType, String headers) {
 }
 
 // Returns HTTP status code (200 = success) or -1 for TCP/connection failure.
+// One stale-session retry: a kept-alive session can die server-side; the
+// first failure terms the session and the second attempt re-inits it.
 int httpPostText(String topic, String headers, String body) {
   SerialMon.println("[HTTP] POST /" + topic + "  (" + String(body.length()) + " bytes)");
-  if (!httpInit("http://ntfy.sh/" + topic, "text/plain", headers)) {
-    sendAT("AT+HTTPTERM", "OK", 1000);
-    return -1;
+  unsigned long t0 = millis();
+  int status = -1;
+
+  for (int attempt = 0; attempt < 2 && status < 0; attempt++) {
+    if (attempt > 0) SerialMon.println("[HTTP] session reset, retrying");
+    if (!httpInit("http://ntfy.sh/" + topic, "text/plain", headers)) { httpTerm(); continue; }
+
+    SerialAT.print("AT+HTTPDATA=");
+    SerialAT.print(body.length());
+    SerialAT.println(",10000");
+    if (!waitDownloadPrompt(3000)) { httpTerm(); continue; }
+    SerialAT.print(body);
+    if (!waitOK(15000))            { httpTerm(); continue; }
+
+    sendAT("AT+HTTPACTION=1", "OK", 3000);
+    status = waitHttpAction(60000);
+    if (status < 0) httpTerm();
   }
 
-  SerialAT.print("AT+HTTPDATA=");
-  SerialAT.print(body.length());
-  SerialAT.println(",10000");
-  if (!waitDownloadPrompt(3000)) { sendAT("AT+HTTPTERM", "OK", 1000); return -1; }
-  SerialAT.print(body);
-  if (!waitOK(15000))            { sendAT("AT+HTTPTERM", "OK", 1000); return -1; }
-
-  sendAT("AT+HTTPACTION=1", "OK", 3000);
-  int status = waitHttpAction(60000);
-
-  sendAT("AT+HTTPTERM", "OK", 1000);
-  if (status < 0)       SerialMon.println("[HTTP] TCP fail");
-  else if (status == 200) SerialMon.println("[HTTP] OK");
-  else                    SerialMon.println("[HTTP] HTTP " + String(status));
+#if !USE_PERSISTENT_HTTP
+  httpTerm();
+#endif
+  unsigned long ms = millis() - t0;
+  if (status < 0)         SerialMon.println("[HTTP] TCP fail (" + String(ms) + " ms)");
+  else if (status == 200) SerialMon.println("[HTTP] OK (" + String(ms) + " ms)");
+  else                    SerialMon.println("[HTTP] HTTP " + String(status) + " (" + String(ms) + " ms)");
   return status;
 }
 
@@ -281,33 +339,39 @@ int httpPostText(String topic, String headers, String body) {
 int httpPostBinary(String topic, String headers, const uint8_t* data, size_t len) {
   SerialMon.println("[HTTP] POST /" + topic + "  (" + String(len) + " binary bytes)");
   if (len > 100000) { SerialMon.println("[HTTP] body too large"); return -1; }
+  unsigned long t0 = millis();
+  int status = -1;
 
-  if (!httpInit("http://ntfy.sh/" + topic, "application/octet-stream", headers)) {
-    sendAT("AT+HTTPTERM", "OK", 1000);
-    return -1;
+  for (int attempt = 0; attempt < 2 && status < 0; attempt++) {
+    if (attempt > 0) SerialMon.println("[HTTP] session reset, retrying");
+    if (!httpInit("http://ntfy.sh/" + topic, "application/octet-stream", headers)) { httpTerm(); continue; }
+
+    SerialAT.print("AT+HTTPDATA=");
+    SerialAT.print(len);
+    SerialAT.println(",60000");
+    if (!waitDownloadPrompt(3000)) { httpTerm(); continue; }
+
+    size_t sent = 0;
+    while (sent < len) {
+      size_t chunk = (len - sent > 1024) ? 1024 : (len - sent);
+      SerialAT.write(data + sent, chunk);
+      sent += chunk;
+      delay(10);
+    }
+    if (!waitOK(30000)) { httpTerm(); continue; }
+
+    sendAT("AT+HTTPACTION=1", "OK", 3000);
+    status = waitHttpAction(120000);
+    if (status < 0) httpTerm();
   }
 
-  SerialAT.print("AT+HTTPDATA=");
-  SerialAT.print(len);
-  SerialAT.println(",60000");
-  if (!waitDownloadPrompt(3000)) { sendAT("AT+HTTPTERM", "OK", 1000); return -1; }
-
-  size_t sent = 0;
-  while (sent < len) {
-    size_t chunk = (len - sent > 1024) ? 1024 : (len - sent);
-    SerialAT.write(data + sent, chunk);
-    sent += chunk;
-    delay(10);
-  }
-  if (!waitOK(30000)) { sendAT("AT+HTTPTERM", "OK", 1000); return -1; }
-
-  sendAT("AT+HTTPACTION=1", "OK", 3000);
-  int status = waitHttpAction(120000);
-
-  sendAT("AT+HTTPTERM", "OK", 1000);
-  if (status < 0)       SerialMon.println("[HTTP] TCP fail");
-  else if (status == 200) SerialMon.println("[HTTP] OK");
-  else                    SerialMon.println("[HTTP] HTTP " + String(status));
+#if !USE_PERSISTENT_HTTP
+  httpTerm();
+#endif
+  unsigned long ms = millis() - t0;
+  if (status < 0)         SerialMon.println("[HTTP] TCP fail (" + String(ms) + " ms)");
+  else if (status == 200) SerialMon.println("[HTTP] OK (" + String(ms) + " ms)");
+  else                    SerialMon.println("[HTTP] HTTP " + String(status) + " (" + String(ms) + " ms)");
   return status;
 }
 
@@ -354,24 +418,31 @@ bool httpPostBinaryRetry(String topic, String headers, const uint8_t* data, size
 int httpPostDirect(const char* url, String body) {
   SerialMon.println("[INGEST] POST (" + String(body.length()) + " bytes)");
   String authHeader = "X-CMD-Secret: " + String(CMD_SECRET);
-  if (!httpInit(String(url), "text/plain", authHeader)) {
-    sendAT("AT+HTTPTERM", "OK", 1000);
-    return -1;
+  unsigned long t0 = millis();
+  int status = -1;
+
+  for (int attempt = 0; attempt < 2 && status < 0; attempt++) {
+    if (attempt > 0) SerialMon.println("[HTTP] session reset, retrying");
+    if (!httpInit(String(url), "text/plain", authHeader)) { httpTerm(); continue; }
+
+    SerialAT.print("AT+HTTPDATA=");
+    SerialAT.print(body.length());
+    SerialAT.println(",10000");
+    if (!waitDownloadPrompt(3000)) { httpTerm(); continue; }
+    SerialAT.print(body);
+    if (!waitOK(15000))            { httpTerm(); continue; }
+
+    sendAT("AT+HTTPACTION=1", "OK", 3000);
+    status = waitHttpAction(30000);
+    if (status < 0) httpTerm();
   }
 
-  SerialAT.print("AT+HTTPDATA=");
-  SerialAT.print(body.length());
-  SerialAT.println(",10000");
-  if (!waitDownloadPrompt(3000)) { sendAT("AT+HTTPTERM", "OK", 1000); return -1; }
-  SerialAT.print(body);
-  if (!waitOK(15000))            { sendAT("AT+HTTPTERM", "OK", 1000); return -1; }
-
-  sendAT("AT+HTTPACTION=1", "OK", 3000);
-  int status = waitHttpAction(30000);
-
-  sendAT("AT+HTTPTERM", "OK", 1000);
-  if (status == 200) SerialMon.println("[INGEST] OK");
-  else               SerialMon.println("[INGEST] failed: " + String(status));
+#if !USE_PERSISTENT_HTTP
+  httpTerm();
+#endif
+  unsigned long ms = millis() - t0;
+  if (status == 200) SerialMon.println("[INGEST] OK (" + String(ms) + " ms)");
+  else               SerialMon.println("[INGEST] failed: " + String(status) + " (" + String(ms) + " ms)");
   return status;
 }
 
@@ -429,22 +500,30 @@ void pollWorkerCommands() {
   String url = String(WORKER_CMD_POLL_URL) + "?since=" + lastCmdId;
 
   String authHeader = "Authorization: Bearer " + String(DEVICE_POLL_TOKEN);
-  if (!httpInit(url, "", authHeader)) {
-    sendAT("AT+HTTPTERM", "OK", 1000);
-    return;
+  unsigned long t0 = millis();
+  int status = -1;
+
+  for (int attempt = 0; attempt < 2 && status < 0; attempt++) {
+    if (attempt > 0) SerialMon.println("[HTTP] session reset, retrying");
+    if (!httpInit(url, "", authHeader)) { httpTerm(); continue; }
+    sendAT("AT+HTTPACTION=0", "OK", 3000);  // GET
+    status = waitHttpAction(15000);
+    if (status < 0) httpTerm();
   }
 
-  sendAT("AT+HTTPACTION=0", "OK", 3000);  // GET
-  int status = waitHttpAction(15000);
-
   if (status != 200) {
-    sendAT("AT+HTTPTERM", "OK", 1000);
+#if !USE_PERSISTENT_HTTP
+    httpTerm();
+#endif
     if (status > 0) SerialMon.println("[CMD] poll HTTP " + String(status));
     return;
   }
 
   String body = httpReadBody(4096);
-  sendAT("AT+HTTPTERM", "OK", 1000);
+#if !USE_PERSISTENT_HTTP
+  httpTerm();
+#endif
+  SerialMon.println("[HTTP] GET poll OK (" + String(millis() - t0) + " ms)");
 
   if (body.length() == 0) return;
 

@@ -34,6 +34,21 @@
 #define LILYGO_RX       26
 #define IMMOBILIZE_PIN  23
 
+// Relay wiring for the immobilizer (AEDIKO relay module on GPIO23):
+//   NC (1): starter line through the NC contact — coil OFF = ignition OK,
+//           coil energized ONLY while immobilized. Saves ~70 mA continuous
+//           and fails safe to "ignition OK" if the system loses power.
+//   NO (0): legacy wiring — coil energized during normal driving.
+// Only the pin-level mapping changes; commands, NVS, and replies are identical.
+#define RELAY_WIRING_NC 1
+#if RELAY_WIRING_NC
+  #define RELAY_IMMOBILIZED_LEVEL HIGH  // coil ON  = starter line broken
+  #define RELAY_IGNITION_OK_LEVEL LOW   // coil OFF = NC contact closed
+#else
+  #define RELAY_IMMOBILIZED_LEVEL LOW
+  #define RELAY_IGNITION_OK_LEVEL HIGH
+#endif
+
 // Status LEDs
 #define LED_GREEN       32
 #define LED_RED         33
@@ -63,6 +78,10 @@ unsigned long lastAlarmTime = 0;
 #define IMG_BUF_SIZE 51200
 uint8_t* imgBuffer = NULL;
 size_t imgSize = 0;
+// Outcome of the last receivePhotoFromCAM() call, for alert diagnostics:
+// "PHOTO_OK <bytes>" / "CAM_NO_RESPONSE" / "CAM_PARTIAL <got>/<expected>" /
+// "CAM_GARBAGE" (non-empty lines received but no valid IMG header).
+String camStatus = "";
 
 // Alarm task control
 volatile bool alarmInProgress = false;
@@ -132,12 +151,14 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
 
-  // Immobilization relay — persisted via NVS so state survives reboot
+  // Immobilization relay — persisted via NVS so state survives reboot.
+  // Default to ignition-OK level, then re-assert immobilized from NVS if set.
   preferences.begin("antitheft", false);
   immobilized = preferences.getBool("immobilized", false);
+  digitalWrite(IMMOBILIZE_PIN, RELAY_IGNITION_OK_LEVEL);  // pre-set output latch
   pinMode(IMMOBILIZE_PIN, OUTPUT);
-  digitalWrite(IMMOBILIZE_PIN, immobilized ? LOW : HIGH);
-  Serial.println(immobilized ? "Ignition: IMMOBILIZED (relay off)" : "Ignition: OK (relay on)");
+  digitalWrite(IMMOBILIZE_PIN, immobilized ? RELAY_IMMOBILIZED_LEVEL : RELAY_IGNITION_OK_LEVEL);
+  Serial.println(immobilized ? "Ignition: IMMOBILIZED" : "Ignition: OK");
 
   // Armed state — persisted via NVS so state survives reboot
   armed = preferences.getBool("armed", false);
@@ -414,20 +435,43 @@ void alarmTask(void* param) {
   String reason = (char*)param;
   free(param);
 
-  Serial.println("  -> Notifying LILYGO");
-  xSemaphoreTake(lilygoMutex, portMAX_DELAY);
-  SerialLilyGO.println("ALERT:" + reason);
-  xSemaphoreGive(lilygoMutex);
-
-  // Step 1.5: Sound local alarm (buzzer + red LED, 3x)
-  Serial.println("Step 1.5: Sounding local alarm (buzzer + red LED)...");
-  soundLocalAlarm();
-
+  // Request photo FIRST — the CAM captures (~2 s burst + SD writes) while
+  // the siren sounds, so evidence is taken before the intruder is warned.
   Serial.println("  -> Requesting photo");
   Serial2.println("PHOTO");
 
+  // Sound local alarm (buzzer + red LED, 3x) during CAM capture
+  Serial.println("Step 1.5: Sounding local alarm (buzzer + red LED)...");
+  soundLocalAlarm();
+
   imgSize = 0;
   bool photoOK = receivePhotoFromCAM();
+  String camResult = camStatus;
+
+  // Single retry on any CAM failure: flush stale RX bytes, give the CAM 2 s
+  // to settle, re-request once. Hard cap of one retry.
+  if (!photoOK) {
+    Serial.println("  -> CAM failed (" + camResult + "), retrying once");
+    while (Serial2.available()) Serial2.read();
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    imgSize = 0;
+    Serial2.println("PHOTO");
+    photoOK = receivePhotoFromCAM();
+    camResult += photoOK ? ",RETRY_OK " + String(imgSize) : ",RETRY_FAIL";
+  }
+
+  // ALERT is sent AFTER the photo phase so the CAM outcome rides along in the
+  // reason string ("Cam: <status>" in the ntfy body). LILYGO starts its image
+  // receive window on ALERT, so IMG/NOIMG following within ms is also safer
+  // than before (retry can stretch the photo phase past LILYGO's 30 s window).
+  // Exception: "Photo Requested" must stay verbatim — LILYGO exact-matches it
+  // to classify user photo requests (low priority, no WhatsApp).
+  Serial.println("  -> Notifying LILYGO (Cam: " + camResult + ")");
+  String alertMsg = reason;
+  if (reason != "Photo Requested") alertMsg += "; Cam: " + camResult;
+  xSemaphoreTake(lilygoMutex, portMAX_DELAY);
+  SerialLilyGO.println("ALERT:" + alertMsg);
+  xSemaphoreGive(lilygoMutex);
 
   if (photoOK && imgSize > 0) {
     Serial.println("  -> Forwarding photo to LILYGO (" + String(imgSize) + " bytes)");
@@ -502,6 +546,7 @@ bool receivePhotoFromCAM() {
   // burst capture (3 frames + SD writes) before transfer starts.
   unsigned long timeout = millis() + 15000;
   bool gotHeader = false;
+  bool sawText = false;  // any non-empty line seen (for CAM_GARBAGE vs NO_RESPONSE)
   size_t expectedSize = 0;
 
   while (millis() < timeout) {
@@ -511,6 +556,7 @@ bool receivePhotoFromCAM() {
         line.trim();
         if (line.length() > 0) {
           Serial.println("  CAM: " + line);
+          sawText = true;
 
           if (line.startsWith("IMG:")) {
             expectedSize = line.substring(4).toInt();
@@ -520,6 +566,7 @@ bool receivePhotoFromCAM() {
               Serial.println("  Receiving " + String(expectedSize) + " bytes...");
             } else {
               Serial.println("  Invalid image size: " + String(expectedSize));
+              camStatus = "CAM_GARBAGE";
               return false;
             }
           }
@@ -541,6 +588,7 @@ bool receivePhotoFromCAM() {
             if (end.length() > 0) Serial.println("  CAM: " + end);
           }
           Serial.println("  Image buffered (" + String(imgSize) + " bytes)");
+          camStatus = "PHOTO_OK " + String(imgSize);
           return true;
         }
       }
@@ -550,8 +598,10 @@ bool receivePhotoFromCAM() {
 
   if (gotHeader) {
     Serial.println("  Photo timeout (" + String(imgSize) + "/" + String(expectedSize) + " bytes)");
+    camStatus = "CAM_PARTIAL " + String(imgSize) + "/" + String(expectedSize);
   } else {
     Serial.println("  Photo timeout (no header)");
+    camStatus = sawText ? "CAM_GARBAGE" : "CAM_NO_RESPONSE";
   }
   return false;
 }
@@ -627,7 +677,7 @@ void handleSMSCommand(String cmd) {
       }
 
       immobilized = true;
-      digitalWrite(IMMOBILIZE_PIN, LOW);
+      digitalWrite(IMMOBILIZE_PIN, RELAY_IMMOBILIZED_LEVEL);
       preferences.putBool("immobilized", true);
       Serial.println("Ignition immobilized via command");
       SerialLilyGO.println("SMS_REPLY:Ignition immobilized");
@@ -638,7 +688,7 @@ void handleSMSCommand(String cmd) {
   } else if (cmd == "RESTORE") {
     if (immobilized) {
       immobilized = false;
-      digitalWrite(IMMOBILIZE_PIN, HIGH);
+      digitalWrite(IMMOBILIZE_PIN, RELAY_IGNITION_OK_LEVEL);
       preferences.putBool("immobilized", false);
       Serial.println("Ignition restored via command");
       SerialLilyGO.println("SMS_REPLY:Ignition restored");

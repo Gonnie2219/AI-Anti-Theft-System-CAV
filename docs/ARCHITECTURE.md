@@ -8,13 +8,14 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
 ### Main ESP32 (`ESP32Main.txt`)
 - **Role:** Central coordinator — reads sensors, controls LEDs, buffers photo, forwards data to LILYGO
 - **Core 1 (loop):** RF remote arm/disarm, sensor polling, LED state, drain LILYGO responses
-- **Core 0 (alarmTask):** Captures photo from CAM via UART, forwards photo + ALERT to LILYGO
+- **Core 0 (alarmTask):** Requests photo from CAM first (siren sounds during capture), retries once on CAM failure, then sends ALERT (with `Cam: <status>` diagnostic) + photo to LILYGO
 - **UARTs:**
   - UART0 (Serial) = USB debug
   - UART2 (Serial2, TX=17 RX=16) = ESP32-CAM
   - UART1 (SerialLilyGO, TX=27 RX=26) = LILYGO
 - **Concurrency:** `lilygoMutex` (FreeRTOS semaphore) protects all SerialLilyGO access across cores. `alarmInProgress` flag prevents sensor re-triggering during alarm processing.
 - **Image buffer:** 50KB heap allocation, filled from CAM then forwarded to LILYGO in 512-byte chunks
+- **Immobilizer:** AEDIKO relay on GPIO23, wired through the **NC** contact (`RELAY_WIRING_NC 1`) — coil energized only while immobilized (GPIO23 HIGH = immobilized, LOW = ignition OK). Saves ~70 mA continuous and fails safe to ignition-OK on power loss. State persists in NVS and is re-asserted at boot.
 
 ### ESP32-CAM (`ESP32CAM.txt`)
 - **Role:** Photo capture + SD card storage
@@ -33,6 +34,7 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
   - UART2 (Serial2, RX=21 TX=19) = Main ESP32
 - **Network:** Hologram SIM, APN "hologram", IPv4 PDP. Connects to ntfy.sh via SIM7600 built-in HTTP stack (AT+HTTPINIT/HTTPPARA/HTTPDATA/HTTPACTION)
 - **Network recovery:** `ensureNetwork()` checks AT+CREG? (local AT command, no data cost) before every outbound HTTP request and re-attaches (CFUN=1 → CGATT=1 → CGACT=1,1) if cellular registration dropped. Logs "NETWORK: recovered" on success.
+- **Persistent HTTP session:** `USE_PERSISTENT_HTTP 1` keeps the modem HTTP(S) service initialized across requests (TCP+TLS handshake reused). Session is termed + re-inited only on transport error/timeout (one retry, logs "[HTTP] session reset, retrying") or when the URL scheme flips http↔https. Per-request timing logged: "[HTTP] OK (NNNN ms)".
 - **Command polling:** Polls the Worker KV command queue (`/commands/poll` over HTTPS, Bearer `DEVICE_POLL_TOKEN`) — **adaptive cadence:** every 5 s while armed or within 10 min of boot / last command / last alert / last status change; every 30 s when idle. Logs "POLL: fast/slow" on transitions. Commands: ARM, DISARM, STATUS, PHOTO, GPS, IMMOBILIZE, RESTORE, HELP. Forwards ARM/DISARM/STATUS/PHOTO/IMMOBILIZE/RESTORE to Main ESP32 via `SMS_CMD:` UART message; handles GPS/HELP locally.
 - **SMS channel:** Native AT+CMGS path disabled (`USE_NATIVE_SMS=0`). Inbound SMS commands arrive via Twilio webhook → Worker → KV command queue; outbound replies are posted to ntfy ("Command Reply") for the Worker to forward.
 - **Notification types:**
@@ -53,7 +55,7 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
 |---------|---------|
 | `STATUS:ARMED` / `STATUS:DISARMED` | Arm/disarm state change |
 | `SMS_REPLY:<text>` | Response text to send back via SMS |
-| `ALERT:<reason>` | Alarm triggered |
+| `ALERT:<reason>[; Cam: <status>]` | Alarm triggered, sent after the photo phase. Cam status: `PHOTO_OK <n>`, `CAM_NO_RESPONSE`, `CAM_PARTIAL <got>/<exp>`, `CAM_GARBAGE`; `,RETRY_OK <n>` / `,RETRY_FAIL` appended after the single retry. Omitted for "Photo Requested" (LILYGO exact-matches it) |
 | `IMG:<size>` + raw bytes + `IMG_END` | Photo data |
 | `NOIMG` | No photo available |
 
@@ -123,6 +125,7 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
 | Image buffer | 50KB | ESP32Main + LILYGO |
 | Alarm task stack | 16KB | ESP32Main |
 | CAM serial RX buffer | 2048 bytes | ESP32Main |
+| CAM photo receive | 15 s timeout, 1 retry after 2 s flush | ESP32Main |
 | Image receive timeout | 30s (outer), 15s (inner) | LILYGO |
 | LILYGO response timeout | 90s | ESP32Main |
 | Heartbeat interval | 5 minutes | LILYGO |
