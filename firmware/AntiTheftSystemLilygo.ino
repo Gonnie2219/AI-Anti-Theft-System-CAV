@@ -290,9 +290,7 @@ static bool httpInit(String url, String contentType, String headers) {
   sendAT("AT+HTTPPARA=\"URL\",\"" + url + "\"", "OK", 3000);
   sendAT("AT+HTTPPARA=\"CONNECTTO\",30", "OK", 2000);
   sendAT("AT+HTTPPARA=\"RECVTO\",30", "OK", 2000);
-  if (contentType.length() > 0) {
-    sendAT("AT+HTTPPARA=\"CONTENT\",\"" + contentType + "\"", "OK", 3000);
-  }
+  sendAT("AT+HTTPPARA=\"CONTENT\",\"" + contentType + "\"", "OK", 3000);
   if (headers.length() > 0) {
     String esc = headers;
     esc.replace("\"", "\\\"");
@@ -459,6 +457,20 @@ String extractJsonString(const String& json, const String& field) {
   return json.substring(start, end);
 }
 
+// [LAT] Extract a bare numeric JSON value (no quotes), e.g. "readTs":1749...
+String extractJsonNumber(const String& json, const String& field) {
+  String key = "\"" + field + "\":";
+  int start = json.indexOf(key);
+  if (start < 0) return "";
+  start += key.length();
+  // Skip whitespace
+  while (start < (int)json.length() && json.charAt(start) == ' ') start++;
+  int end = start;
+  while (end < (int)json.length() && json.charAt(end) >= '0' && json.charAt(end) <= '9') end++;
+  if (end == start) return "";
+  return json.substring(start, end);
+}
+
 // ─────────────────────────────────────────────────────────────
 //  HTTP read body (for GET responses)
 // ─────────────────────────────────────────────────────────────
@@ -503,6 +515,9 @@ void pollWorkerCommands() {
   unsigned long t0 = millis();
   int status = -1;
 
+  // Force fresh session — persistent reuse causes edge 400 on stale socket
+  httpTerm();
+
   for (int attempt = 0; attempt < 2 && status < 0; attempt++) {
     if (attempt > 0) SerialMon.println("[HTTP] session reset, retrying");
     if (!httpInit(url, "", authHeader)) { httpTerm(); continue; }
@@ -529,6 +544,8 @@ void pollWorkerCommands() {
 
   // Extract latestId (top-level string field in JSON response)
   String newLatestId = extractJsonString(body, "latestId");
+  // [LAT] Extract top-level readTs for latency measurement
+  String readTsStr = extractJsonNumber(body, "readTs");
 
   // Parse commands array — find each "command":"VALUE" in the response.
   // Worker returns: {"commands":[{"id":"...","command":"STATUS"},...],"latestId":"..."}
@@ -545,6 +562,28 @@ void pollWorkerCommands() {
     cmd.trim();
     cmd.toUpperCase();
     hadCommands = true;
+
+    // [LAT] Extract per-command writeTs and log latency metrics
+    {
+      // Search forward from cmdStart — writeTs follows "command" in the JSON object
+      int wtSearch = body.indexOf("\"writeTs\":", cmdStart);
+      String writeTsStr = "";
+      if (wtSearch >= 0) writeTsStr = extractJsonNumber(body.substring(wtSearch), "writeTs");
+      unsigned long httpMs = millis() - t0;
+      String pollWaitMs = "";
+      if (writeTsStr.length() > 0 && readTsStr.length() > 0) {
+        // Both are epoch-ms strings — subtract as doubles to avoid 32-bit overflow
+        double wt = 0, rt = 0;
+        for (int i = 0; i < (int)writeTsStr.length(); i++) wt = wt * 10 + (writeTsStr.charAt(i) - '0');
+        for (int i = 0; i < (int)readTsStr.length(); i++) rt = rt * 10 + (readTsStr.charAt(i) - '0');
+        pollWaitMs = String((long)(rt - wt));
+      }
+      SerialMon.println("[LAT] cmd=" + cmd +
+                         " writeTs=" + writeTsStr +
+                         " readTs=" + readTsStr +
+                         " pollWaitMs=" + pollWaitMs +
+                         " httpMs=" + String(httpMs));
+    }
 
     if (skipExecution) {
       SerialMon.println("[CMD] skipped (first boot): " + cmd);
@@ -749,16 +788,22 @@ void handleSMSCommand(String cmd) {
   SerialMon.println("[CMD] " + cmd);
 
   if (cmd == "ARM") {
+    SerialMon.println("[LAT] uart_relay cmd=ARM t=" + String(millis()));
     SerialMain.println("SMS_CMD:ARM");
   } else if (cmd == "DISARM") {
+    SerialMon.println("[LAT] uart_relay cmd=DISARM t=" + String(millis()));
     SerialMain.println("SMS_CMD:DISARM");
   } else if (cmd == "STATUS") {
+    SerialMon.println("[LAT] uart_relay cmd=STATUS t=" + String(millis()));
     SerialMain.println("SMS_CMD:STATUS");
   } else if (cmd == "PHOTO") {
+    SerialMon.println("[LAT] uart_relay cmd=PHOTO t=" + String(millis()));
     SerialMain.println("SMS_CMD:PHOTO");
   } else if (cmd == "IMMOBILIZE") {
+    SerialMon.println("[LAT] uart_relay cmd=IMMOBILIZE t=" + String(millis()));
     SerialMain.println("SMS_CMD:IMMOBILIZE");
   } else if (cmd == "RESTORE") {
+    SerialMon.println("[LAT] uart_relay cmd=RESTORE t=" + String(millis()));
     SerialMain.println("SMS_CMD:RESTORE");
   } else if (cmd == "GPS") {
     updateGPS();
@@ -1139,6 +1184,21 @@ void setup() {
 //  Main loop
 // ─────────────────────────────────────────────────────────────
 void loop() {
+  unsigned long now = millis();
+
+  // Command poll FIRST — highest priority, latency-sensitive
+  bool wantFast = systemArmed || (now - lastActivityMs < POLL_ACTIVE_WINDOW_MS);
+  if (wantFast != pollFast) {
+    pollFast = wantFast;
+    if (pollFast) SerialMon.println(systemArmed ? "POLL: fast (armed)" : "POLL: fast (recent activity)");
+    else          SerialMon.println("POLL: slow (idle)");
+  }
+  if (now - lastCmdPoll > (pollFast ? CMD_POLL_FAST_MS : CMD_POLL_SLOW_MS)) {
+    pollWorkerCommands();
+    lastCmdPoll = now;
+    now = millis();  // refresh after blocking call
+  }
+
   // 1) Commands from Main ESP32
   if (SerialMain.available()) {
     String cmd = SerialMain.readStringUntil('\n');
@@ -1182,21 +1242,6 @@ void loop() {
     if (urc.indexOf("+CMTI:") >= 0) pollIncomingSMS();
   }
 #endif
-
-  unsigned long now = millis();
-
-  // 3) Poll Worker command queue (SMS / Dashboard → Worker KV → here)
-  //    Adaptive cadence: 5 s while armed or recently active, 30 s idle.
-  bool wantFast = systemArmed || (now - lastActivityMs < POLL_ACTIVE_WINDOW_MS);
-  if (wantFast != pollFast) {
-    pollFast = wantFast;
-    if (pollFast) SerialMon.println(systemArmed ? "POLL: fast (armed)" : "POLL: fast (recent activity)");
-    else          SerialMon.println("POLL: slow (idle)");
-  }
-  if (now - lastCmdPoll > (pollFast ? CMD_POLL_FAST_MS : CMD_POLL_SLOW_MS)) {
-    pollWorkerCommands();
-    lastCmdPoll = now;
-  }
 
 #if USE_NATIVE_SMS
   // 4) Periodic SMS poll (catches URCs eaten by other AT calls)
