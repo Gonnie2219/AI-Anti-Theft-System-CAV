@@ -689,15 +689,20 @@ function handleNotification(msg, historical) {
         matched = true;
       }
     }
-    if (pendingCmd.cmd === 'ARM' && bodyLower.indexOf('armed') >= 0 && bodyLower.indexOf('disarmed') < 0) {
+    if (pendingCmd.cmd === 'ARM' && bodyLower.startsWith('system armed')) {
       console.log('[CmdClear] ARM cleared by SSE body:', body.slice(0, 120));
-      matched = true;
+      matched = 'ARMED';
     }
-    if (pendingCmd.cmd === 'DISARM' && bodyLower.indexOf('disarmed') >= 0) {
+    if (pendingCmd.cmd === 'DISARM' && bodyLower.startsWith('system disarmed')) {
       console.log('[CmdClear] DISARM cleared by SSE body:', body.slice(0, 120));
-      matched = true;
+      matched = 'DISARMED';
     }
-    if (matched) confirmCommand();
+    if (matched === 'ARMED' || matched === 'DISARMED') {
+      confirmCommand();
+      updateStatus(matched);
+    } else if (matched) {
+      confirmCommand();
+    }
   }
 
   const locMatch = body.match(/Location:\s*([-\d.]+),([-\d.]+)/);
