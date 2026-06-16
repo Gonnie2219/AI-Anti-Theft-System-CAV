@@ -109,11 +109,13 @@ unsigned long lastCmdPoll   = 0;
 unsigned long lastActivityMs = 0;
 bool          pollFast       = true;
 
-// MQTT URC intercept layer — populated by drainSerialAT().
-// mqttPendingCmd and mqttConnected are inert until Step 2 (MQTT connect).
+// MQTT URC intercept + connection layer.
 String atBuffer;                     // persistent serial accumulator
 String mqttPendingCmd;               // single-slot command queue
 volatile bool mqttConnected = false;
+unsigned long lastMqttReconnectMs = 0;
+const unsigned long MQTT_RECONNECT_INTERVAL_MS = 10000;  // 10s backoff
+static const char* MQTT_CMD_TOPIC = "cmd/antitheft/commands";
 
 #if USE_NATIVE_SMS
 unsigned long lastSMSPoll   = 0;
@@ -124,62 +126,104 @@ unsigned long smsHourStart  = 0;
 // ─────────────────────────────────────────────────────────────
 //  Centralized SerialAT reader — intercepts MQTT URCs
 // ─────────────────────────────────────────────────────────────
-// Reads all available bytes from SerialAT.  Any +CMQTTRECV or
+// Reads all available bytes from SerialAT.  Any MQTT RX block or
 // +CMQTTCONNLOST URCs are extracted and handled; everything else
 // is appended to the global `atBuffer` for the caller to consume.
 // When no MQTT URCs are present this is byte-for-byte equivalent
 // to the old `while (SerialAT.available()) acc += (char)SerialAT.read()`.
 //
-// Partial-URC safety: if a +CMQTT* URC is detected but not yet
-// fully received, everything from the URC marker onward is held
+// Partial-URC safety: if a +CMQTTRXSTART is detected but +CMQTTRXEND
+// has not yet arrived, everything from the marker onward is held
 // back in atBuffer.  Only the bytes BEFORE the marker are returned
 // to the caller, so HTTP pattern-matchers never see URC fragments.
 void drainSerialAT() {
   while (SerialAT.available()) atBuffer += (char)SerialAT.read();
 
-  // ── +CMQTTRECV: <client>,<topic_len>,<payload_len>\r\n<topic>\r\n<payload> ──
-  int mqIdx = atBuffer.indexOf("+CMQTTRECV:");
-  if (mqIdx >= 0) {
-    int nl1 = atBuffer.indexOf('\n', mqIdx);
-    if (nl1 < 0) {
-      // Header line incomplete — hold back from mqIdx onward
-      atBuffer = atBuffer.substring(0, mqIdx);
-      return;
-    }
-    String hdr = atBuffer.substring(mqIdx, nl1);
-    int c1 = hdr.indexOf(',');
-    int c2 = (c1 >= 0) ? hdr.indexOf(',', c1 + 1) : -1;
-    if (c1 < 0 || c2 <= c1) {
-      // Malformed header — discard the line, keep the rest
-      int removeEnd = nl1 + 1;
-      atBuffer = atBuffer.substring(0, mqIdx) + atBuffer.substring(removeEnd);
-      return;
-    }
-    int topicLen   = hdr.substring(c1 + 1, c2).toInt();
-    int payloadLen = hdr.substring(c2 + 1).toInt();
-    int payloadStart = nl1 + 1 + topicLen + 1;  // skip topic + its \n
-    int urcEnd = payloadStart + payloadLen;
-    if (urcEnd > (int)atBuffer.length()) {
-      // Payload incomplete — hold back from mqIdx onward
-      atBuffer = atBuffer.substring(0, mqIdx);
-      return;
-    }
-    // Full URC received — extract payload, splice out the URC
-    mqttPendingCmd = atBuffer.substring(payloadStart, urcEnd);
-    int removeEnd = urcEnd;
-    while (removeEnd < (int)atBuffer.length() &&
-           (atBuffer.charAt(removeEnd) == '\r' || atBuffer.charAt(removeEnd) == '\n'))
-      removeEnd++;
-    atBuffer = atBuffer.substring(0, mqIdx) + atBuffer.substring(removeEnd);
+  // ── Cap atBuffer to prevent unbounded growth / heap fragmentation ──
+  int bufLen = atBuffer.length();
+  if (bufLen > 16384) {
+    Serial.println("[MQTT] RX buffer overflow, dropped");
+    atBuffer = "";
+    return;
+  }
+  if (bufLen > 8192 && atBuffer.indexOf("+CMQTTRXSTART:") < 0) {
+    atBuffer = "";
     return;
   }
 
-  // ── +CMQTTCONNLOST: <client>,<reason>\r\n ──
+  // ── Multi-line MQTT RX block ──────────────────────────────
+  //
+  // +CMQTTRXSTART: <client>,<topic_total_len>,<payload_total_len>\r\n
+  // +CMQTTRXTOPIC: <client>,<sub_len>\r\n<topic_bytes>\r\n
+  //   (may repeat; sub-lengths sum to topic_total_len)
+  // +CMQTTRXPAYLOAD: <client>,<sub_len>\r\n<payload_bytes>\r\n
+  //   (may repeat; sub-lengths sum to payload_total_len)
+  // +CMQTTRXEND: <client>\r\n
+  int rxIdx = atBuffer.indexOf("+CMQTTRXSTART:");
+  if (rxIdx >= 0) {
+    int endIdx = atBuffer.indexOf("+CMQTTRXEND:", rxIdx);
+    if (endIdx < 0) {
+      // Block incomplete — hold back from rxIdx onward
+      atBuffer = atBuffer.substring(0, rxIdx);
+      return;
+    }
+    // Require a PAYLOAD marker between START and END (splice safety)
+    int payCheck = atBuffer.indexOf("+CMQTTRXPAYLOAD:", rxIdx);
+    if (payCheck < 0 || payCheck >= endIdx) {
+      // False match (binary collision) — hold back
+      atBuffer = atBuffer.substring(0, rxIdx);
+      return;
+    }
+    // Bound end-line: \n must be within 32 chars of endIdx
+    int endLineEnd = atBuffer.indexOf('\n', endIdx);
+    if (endLineEnd < 0 || endLineEnd - endIdx > 32) {
+      atBuffer = atBuffer.substring(0, rxIdx);
+      return;
+    }
+    endLineEnd++;  // consume the \n
+
+    // Extract the full block for parsing
+    String block = atBuffer.substring(rxIdx, endLineEnd);
+
+    // Parse payload by concatenating all +CMQTTRXPAYLOAD chunks
+    String payload;
+    int searchFrom = 0;
+    while (true) {
+      int pIdx = block.indexOf("+CMQTTRXPAYLOAD:", searchFrom);
+      if (pIdx < 0) break;
+      int comma = block.indexOf(',', pIdx + 16);  // skip "+CMQTTRXPAYLOAD:"
+      if (comma < 0) break;
+      int nlAfterHdr = block.indexOf('\n', comma);
+      if (nlAfterHdr < 0) break;
+      int subLen = block.substring(comma + 1, nlAfterHdr).toInt();
+      int dataStart = nlAfterHdr + 1;  // first byte after \n
+      if (dataStart + subLen <= (int)block.length()) {
+        payload += block.substring(dataStart, dataStart + subLen);
+      }
+      searchFrom = dataStart + subLen;
+    }
+
+    // Trim trailing \r, \n, and space from assembled payload
+    String cleaned = payload;
+    while (cleaned.length() > 0) {
+      char last = cleaned.charAt(cleaned.length() - 1);
+      if (last == '\r' || last == '\n' || last == ' ') cleaned = cleaned.substring(0, cleaned.length() - 1);
+      else break;
+    }
+
+    mqttPendingCmd = cleaned;
+
+    // Splice the entire block out of atBuffer
+    atBuffer = atBuffer.substring(0, rxIdx) + atBuffer.substring(endLineEnd);
+    return;
+  }
+
+  // ── +CMQTTCONNLOST: <client>,<cause>\r\n ──
   int lostIdx = atBuffer.indexOf("+CMQTTCONNLOST:");
   if (lostIdx >= 0) {
     int lostEnd = atBuffer.indexOf('\n', lostIdx);
-    if (lostEnd < 0) {
-      // Line incomplete — hold back from lostIdx onward
+    if (lostEnd < 0 || lostEnd - lostIdx > 32) {
+      // Line incomplete or false match — hold back
       atBuffer = atBuffer.substring(0, lostIdx);
       return;
     }
@@ -187,6 +231,133 @@ void drainSerialAT() {
     mqttConnected = false;
     lostEnd++;  // consume the \n
     atBuffer = atBuffer.substring(0, lostIdx) + atBuffer.substring(lostEnd);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  MQTT connect — bring up HiveMQ Cloud via AT+CMQTT*
+// ─────────────────────────────────────────────────────────────
+// Non-blocking in the sense that it returns cleanly on any
+// failure (no halt, no retry loop).  Caller retries via loop().
+void connectMQTT() {
+  SerialMon.println("[MQTT] === Connecting ===");
+
+  // Defensive teardown — clear stale MQTT state from prior run
+  sendAT("AT+CMQTTDISC=0,60", "OK", 5000);
+  delay(200); while (SerialAT.available()) SerialAT.read();
+  sendAT("AT+CMQTTSTOP", "OK", 3000);
+  delay(500); while (SerialAT.available()) SerialAT.read();
+
+  // Start MQTT service
+  String r = sendAT("AT+CMQTTSTART", "OK", 5000);
+  if (r.indexOf("OK") < 0) {
+    SerialMon.println("[MQTT] CMQTTSTART failed: " + r);
+    return;
+  }
+
+  // Acquire client 0 in SSL mode
+  r = sendAT("AT+CMQTTACCQ=0,\"antitheft-lilygo\",1", "OK", 5000);
+  if (r.indexOf("OK") < 0) {
+    SerialMon.println("[MQTT] CMQTTACCQ failed: " + r);
+    sendAT("AT+CMQTTSTOP", "OK", 3000);
+    return;
+  }
+
+  // Bind to SSL context 0 (already configured in setup)
+  r = sendAT("AT+CMQTTSSLCFG=0,0", "OK", 3000);
+  if (r.indexOf("OK") < 0) {
+    SerialMon.println("[MQTT] CMQTTSSLCFG failed: " + r);
+    sendAT("AT+CMQTTREL=0", "OK", 3000);
+    sendAT("AT+CMQTTSTOP", "OK", 3000);
+    return;
+  }
+
+  // Pre-connect check: abort if an alert is pending — don't block the loop
+  if (alarmInProgress || SerialMain.available()) {
+    SerialMon.println("[MQTT] connect aborted (alert pending)");
+    sendAT("AT+CMQTTREL=0", "OK", 3000);
+    sendAT("AT+CMQTTSTOP", "OK", 3000);
+    return;
+  }
+
+  // Connect to broker (8s timeout — keeps worst-case loop stall bounded)
+  String connectCmd = "AT+CMQTTCONNECT=0,\"tcp://"
+    + String(MQTT_HOST) + ":" + String(MQTT_PORT)
+    + "\",60,1,\"" + String(MQTT_USER) + "\",\"" + String(MQTT_PASS) + "\"";
+  r = sendAT(connectCmd, "+CMQTTCONNECT: 0,0", 8000);
+  if (r.indexOf("+CMQTTCONNECT: 0,0") < 0) {
+    SerialMon.println("[MQTT] CONNECT failed: " + r);
+    sendAT("AT+CMQTTREL=0", "OK", 3000);
+    sendAT("AT+CMQTTSTOP", "OK", 3000);
+    return;
+  }
+
+  // Subscribe — Form A: AT+CMQTTSUB=0,<len>,1  then > prompt then topic bytes
+  int tlen = strlen(MQTT_CMD_TOPIC);
+  drainSerialAT(); atBuffer = "";
+  SerialAT.print("AT+CMQTTSUB=0,");
+  SerialAT.print(tlen);
+  SerialAT.print(",1\r\n");
+
+  // Wait for > prompt
+  unsigned long t0 = millis();
+  bool gotPrompt = false;
+  while (millis() - t0 < 5000) {
+    while (SerialAT.available()) {
+      if (SerialAT.read() == '>') { gotPrompt = true; break; }
+    }
+    if (gotPrompt) break;
+    delay(5);
+  }
+  if (!gotPrompt) {
+    SerialMon.println("[MQTT] SUB no > prompt");
+    sendAT("AT+CMQTTDISC=0,60", "OK", 5000);
+    sendAT("AT+CMQTTREL=0", "OK", 3000);
+    sendAT("AT+CMQTTSTOP", "OK", 3000);
+    return;
+  }
+
+  // Send topic bytes — NO trailing CRLF
+  SerialAT.write((const uint8_t*)MQTT_CMD_TOPIC, tlen);
+
+  // Wait for +CMQTTSUB: 0,0
+  String subResp;
+  t0 = millis();
+  while (millis() - t0 < 10000) {
+    while (SerialAT.available()) subResp += (char)SerialAT.read();
+    if (subResp.indexOf("+CMQTTSUB: 0,0") >= 0) break;
+    delay(10);
+  }
+  if (subResp.indexOf("+CMQTTSUB: 0,0") < 0) {
+    SerialMon.println("[MQTT] SUB failed: " + subResp);
+    sendAT("AT+CMQTTDISC=0,60", "OK", 5000);
+    sendAT("AT+CMQTTREL=0", "OK", 3000);
+    sendAT("AT+CMQTTSTOP", "OK", 3000);
+    return;
+  }
+
+  // Drain any leftover before returning to normal operation
+  delay(200);
+  while (SerialAT.available()) SerialAT.read();
+  atBuffer = "";
+
+  mqttConnected = true;
+  SerialMon.println("[MQTT] Connected + subscribed to " + String(MQTT_CMD_TOPIC));
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Consume pending MQTT commands (max 3 per call to avoid starving loop)
+// ─────────────────────────────────────────────────────────────
+void consumeMqttCommand() {
+  for (int i = 0; i < 3; i++) {
+    if (mqttPendingCmd.length() == 0) return;
+    String cmd = mqttPendingCmd;
+    mqttPendingCmd = "";  // clear immediately to prevent double-process
+    SerialMon.println("[MQTT] dispatch: " + cmd);
+    lastActivityMs = millis();  // MQTT command = activity (triggers fast poll)
+    handleSMSCommand(cmd);
+    // Re-drain in case another URC arrived during handleSMSCommand
+    drainSerialAT();
   }
 }
 
@@ -1198,6 +1369,10 @@ void setup() {
   SerialMon.println("SysInfo:   " + cpsi.substring(cpsi.indexOf("+CPSI:")));
   SerialMon.println("LastErr:   " + ceer.substring(ceer.indexOf("+CEER:")));
 
+  // MQTT — connect to HiveMQ Cloud for push commands
+  connectMQTT();
+  lastMqttReconnectMs = millis();
+
   // GPS on
   String gpsResp = sendAT("AT+CGPS=1", "OK", 2000);
   if (gpsResp.indexOf("OK") >= 0) SerialMon.println("[GPS] AT+CGPS=1 OK - GPS started");
@@ -1260,6 +1435,22 @@ void setup() {
 // ─────────────────────────────────────────────────────────────
 void loop() {
   unsigned long now = millis();
+
+  // ── MQTT idle drain + consume (skip during alert/photo to avoid byte theft) ──
+  if (!alarmInProgress) {
+    drainSerialAT();
+    consumeMqttCommand();
+
+    // Non-blocking reconnect with backoff
+    if (!mqttConnected
+        && !SerialMain.available()
+        && (now - lastMqttReconnectMs > MQTT_RECONNECT_INTERVAL_MS)) {
+      SerialMon.println("[MQTT] reconnecting...");
+      connectMQTT();
+      lastMqttReconnectMs = millis();
+      now = millis();
+    }
+  }
 
   // Command poll FIRST — highest priority, latency-sensitive
   bool wantFast = systemArmed || (now - lastActivityMs < POLL_ACTIVE_WINDOW_MS);
