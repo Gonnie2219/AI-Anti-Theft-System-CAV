@@ -109,6 +109,12 @@ unsigned long lastCmdPoll   = 0;
 unsigned long lastActivityMs = 0;
 bool          pollFast       = true;
 
+// MQTT URC intercept layer — populated by drainSerialAT().
+// mqttPendingCmd and mqttConnected are inert until Step 2 (MQTT connect).
+String atBuffer;                     // persistent serial accumulator
+String mqttPendingCmd;               // single-slot command queue
+volatile bool mqttConnected = false;
+
 #if USE_NATIVE_SMS
 unsigned long lastSMSPoll   = 0;
 int           smsCount      = 0;
@@ -116,15 +122,84 @@ unsigned long smsHourStart  = 0;
 #endif
 
 // ─────────────────────────────────────────────────────────────
+//  Centralized SerialAT reader — intercepts MQTT URCs
+// ─────────────────────────────────────────────────────────────
+// Reads all available bytes from SerialAT.  Any +CMQTTRECV or
+// +CMQTTCONNLOST URCs are extracted and handled; everything else
+// is appended to the global `atBuffer` for the caller to consume.
+// When no MQTT URCs are present this is byte-for-byte equivalent
+// to the old `while (SerialAT.available()) acc += (char)SerialAT.read()`.
+//
+// Partial-URC safety: if a +CMQTT* URC is detected but not yet
+// fully received, everything from the URC marker onward is held
+// back in atBuffer.  Only the bytes BEFORE the marker are returned
+// to the caller, so HTTP pattern-matchers never see URC fragments.
+void drainSerialAT() {
+  while (SerialAT.available()) atBuffer += (char)SerialAT.read();
+
+  // ── +CMQTTRECV: <client>,<topic_len>,<payload_len>\r\n<topic>\r\n<payload> ──
+  int mqIdx = atBuffer.indexOf("+CMQTTRECV:");
+  if (mqIdx >= 0) {
+    int nl1 = atBuffer.indexOf('\n', mqIdx);
+    if (nl1 < 0) {
+      // Header line incomplete — hold back from mqIdx onward
+      atBuffer = atBuffer.substring(0, mqIdx);
+      return;
+    }
+    String hdr = atBuffer.substring(mqIdx, nl1);
+    int c1 = hdr.indexOf(',');
+    int c2 = (c1 >= 0) ? hdr.indexOf(',', c1 + 1) : -1;
+    if (c1 < 0 || c2 <= c1) {
+      // Malformed header — discard the line, keep the rest
+      int removeEnd = nl1 + 1;
+      atBuffer = atBuffer.substring(0, mqIdx) + atBuffer.substring(removeEnd);
+      return;
+    }
+    int topicLen   = hdr.substring(c1 + 1, c2).toInt();
+    int payloadLen = hdr.substring(c2 + 1).toInt();
+    int payloadStart = nl1 + 1 + topicLen + 1;  // skip topic + its \n
+    int urcEnd = payloadStart + payloadLen;
+    if (urcEnd > (int)atBuffer.length()) {
+      // Payload incomplete — hold back from mqIdx onward
+      atBuffer = atBuffer.substring(0, mqIdx);
+      return;
+    }
+    // Full URC received — extract payload, splice out the URC
+    mqttPendingCmd = atBuffer.substring(payloadStart, urcEnd);
+    int removeEnd = urcEnd;
+    while (removeEnd < (int)atBuffer.length() &&
+           (atBuffer.charAt(removeEnd) == '\r' || atBuffer.charAt(removeEnd) == '\n'))
+      removeEnd++;
+    atBuffer = atBuffer.substring(0, mqIdx) + atBuffer.substring(removeEnd);
+    return;
+  }
+
+  // ── +CMQTTCONNLOST: <client>,<reason>\r\n ──
+  int lostIdx = atBuffer.indexOf("+CMQTTCONNLOST:");
+  if (lostIdx >= 0) {
+    int lostEnd = atBuffer.indexOf('\n', lostIdx);
+    if (lostEnd < 0) {
+      // Line incomplete — hold back from lostIdx onward
+      atBuffer = atBuffer.substring(0, lostIdx);
+      return;
+    }
+    // Full line received — flag disconnect, splice out
+    mqttConnected = false;
+    lostEnd++;  // consume the \n
+    atBuffer = atBuffer.substring(0, lostIdx) + atBuffer.substring(lostEnd);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 //  AT command helper
 // ─────────────────────────────────────────────────────────────
 String sendAT(String cmd, String expect, unsigned long timeout) {
-  while (SerialAT.available()) SerialAT.read();
+  drainSerialAT(); atBuffer = "";     // discard stale data (preserves MQTT intercept)
   SerialAT.println(cmd);
   unsigned long start = millis();
   String resp;
   while (millis() - start < timeout) {
-    while (SerialAT.available()) resp += (char)SerialAT.read();
+    drainSerialAT(); resp += atBuffer; atBuffer = "";
     if (resp.indexOf(expect) >= 0) break;
     delay(10);
   }
@@ -198,7 +273,7 @@ static int waitHttpAction(unsigned long timeout) {
   unsigned long start = millis();
   String acc;
   while (millis() - start < timeout) {
-    while (SerialAT.available()) acc += (char)SerialAT.read();
+    drainSerialAT(); acc += atBuffer; atBuffer = "";
     int idx = acc.indexOf("+HTTPACTION:");
     if (idx >= 0) {
       int eol = acc.indexOf('\n', idx);
@@ -221,7 +296,7 @@ static bool waitDownloadPrompt(unsigned long timeout) {
   unsigned long start = millis();
   String r;
   while (millis() - start < timeout) {
-    while (SerialAT.available()) r += (char)SerialAT.read();
+    drainSerialAT(); r += atBuffer; atBuffer = "";
     if (r.indexOf("DOWNLOAD") >= 0) return true;
     if (r.indexOf("ERROR") >= 0) return false;
     delay(10);
@@ -233,7 +308,7 @@ static bool waitOK(unsigned long timeout) {
   unsigned long start = millis();
   String r;
   while (millis() - start < timeout) {
-    while (SerialAT.available()) r += (char)SerialAT.read();
+    drainSerialAT(); r += atBuffer; atBuffer = "";
     if (r.indexOf("OK") >= 0) return true;
     if (r.indexOf("ERROR") >= 0) return false;
     delay(10);
@@ -476,13 +551,13 @@ String extractJsonNumber(const String& json, const String& field) {
 // ─────────────────────────────────────────────────────────────
 String httpReadBody(int maxLen) {
   String cmd = "AT+HTTPREAD=0," + String(maxLen);
-  while (SerialAT.available()) SerialAT.read();
+  drainSerialAT(); atBuffer = "";     // discard stale data (preserves MQTT intercept)
   SerialAT.println(cmd);
 
   unsigned long start = millis();
   String acc;
   while (millis() - start < 10000) {
-    while (SerialAT.available()) acc += (char)SerialAT.read();
+    drainSerialAT(); acc += atBuffer; atBuffer = "";
     if (acc.indexOf("OK") >= 0 || acc.indexOf("ERROR") >= 0) break;
     delay(20);
   }
