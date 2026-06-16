@@ -30,7 +30,7 @@ module.exports = async function handler(req, res) {
     const contentType = imgResp.headers.get('content-type') || 'image/jpeg';
 
     const message = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 256,
       messages: [{
         role: 'user',
@@ -48,7 +48,7 @@ module.exports = async function handler(req, res) {
 
     return res.status(200).json({ verdict, threatLevel });
   } catch (err) {
-    console.error('Analyze error:', err);
+    console.error('Analyze error:', err.status || '', err.message || err);
     return res.status(500).json({ error: 'Analysis failed' });
   }
 };
