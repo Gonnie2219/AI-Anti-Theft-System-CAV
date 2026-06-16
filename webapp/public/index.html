@@ -443,6 +443,7 @@ let lastMessageTime = null;
 let lastKnownStatus = null;
 let lastIgnitionState = false;
 let isOffline = false;
+let staleGuardTs = 0;
 const seenMsgIds = new Set();
 
 // Speed / motion state
@@ -566,6 +567,11 @@ async function pollWorkerStatus() {
       return; // Don't correct status while a command is pending
     }
 
+    // After a timeout, KV may still be stale. Don't assert until KV
+    // timestamp proves it reflects post-timeout device state.
+    if (staleGuardTs && (!data.ts || data.ts < staleGuardTs)) return;
+    staleGuardTs = 0;
+
     var workerArmed = data.armed ? 'ARMED' : 'DISARMED';
     if (workerArmed !== lastKnownStatus) {
       console.log('[Status poll] correcting: ' + lastKnownStatus + ' -> ' + workerArmed);
@@ -657,14 +663,6 @@ function handleNotification(msg, historical) {
 
   var bodyLower = body.toLowerCase();
 
-  // Ignition state detection
-  if (bodyLower.indexOf('immobilized') >= 0) {
-    updateIgnition(true);
-  }
-  if (bodyLower.indexOf('ignition restored') >= 0 || bodyLower.indexOf('ignition_ok') >= 0 || bodyLower.indexOf('ignition: ok') >= 0) {
-    updateIgnition(false);
-  }
-
   // --- Reply-gated pending-command clearing ---
   // Lenient on body, strict on kind. Log every match for debugging.
   if (!historical && pendingCmd) {
@@ -689,20 +687,18 @@ function handleNotification(msg, historical) {
         matched = true;
       }
     }
-    if (pendingCmd.cmd === 'ARM' && bodyLower.startsWith('system armed')) {
-      console.log('[CmdClear] ARM cleared by SSE body:', body.slice(0, 120));
-      matched = 'ARMED';
-    }
-    if (pendingCmd.cmd === 'DISARM' && bodyLower.startsWith('system disarmed')) {
-      console.log('[CmdClear] DISARM cleared by SSE body:', body.slice(0, 120));
-      matched = 'DISARMED';
-    }
-    if (matched === 'ARMED' || matched === 'DISARMED') {
-      confirmCommand();
-      updateStatus(matched);
-    } else if (matched) {
-      confirmCommand();
-    }
+    if (matched) confirmCommand();
+  }
+
+  // --- Always-on live state reconcile ---
+  // Authoritative "System X" messages update pill unconditionally on live SSE,
+  // even with no pending command. Handles: fast confirm, late arrival after
+  // timeout, unsolicited state changes.  History excluded (stale bodies).
+  if (!historical) {
+    if (bodyLower.startsWith('system armed'))            { confirmCommand(); updateStatus('ARMED'); }
+    else if (bodyLower.startsWith('system disarmed'))    { confirmCommand(); updateStatus('DISARMED'); }
+    else if (bodyLower.startsWith('system immobilized')) { confirmCommand(); updateIgnition(true); }
+    else if (bodyLower.startsWith('system ignition_ok')) { confirmCommand(); updateIgnition(false); }
   }
 
   const locMatch = body.match(/Location:\s*([-\d.]+),([-\d.]+)/);
@@ -1185,13 +1181,20 @@ function markCommandFailed(reason) {
   pendingCmd = null;
 
   if (p.cmd === 'ARM' || p.cmd === 'DISARM') {
-    // Don't assert a stale state — show Unknown until next /status confirms
     var pill = document.getElementById('status-pill');
     pill.textContent = 'Unknown';
     pill.className = 'status-pill pill-unknown';
+    lastKnownStatus = null;
+    localStorage.removeItem('lastKnownStatus');
+    staleGuardTs = Date.now();
   }
   if (p.cmd === 'IMMOBILIZE' || p.cmd === 'RESTORE') {
-    updateIgnition(p.previousIgnition);
+    var ipill = document.getElementById('ignition-pill');
+    ipill.textContent = 'IGNITION ?';
+    ipill.className = 'status-pill pill-pending';
+    lastIgnitionState = null;
+    localStorage.removeItem('lastIgnitionState');
+    staleGuardTs = Date.now();
   }
 
   p.btn.classList.remove('pending');
