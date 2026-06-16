@@ -829,16 +829,6 @@ async function handleInboundSMS(request, env) {
   // Write to KV — SMS commands use the KV path (Worker→KV is same-edge = fast).
   await enqueueCommand(env, rawBody, "sms");
 
-  // Optimistic status update — same as dashboard dispatch, so the dashboard
-  // reflects SMS-triggered state changes without waiting for the cron cycle.
-  const SMS_STATUS_CMDS = { ARM: "armed", DISARM: "armed", IMMOBILIZE: "immobilized", RESTORE: "immobilized" };
-  if (rawBody in SMS_STATUS_CMDS) {
-    const stored = parseSystemStatus(await env.ANTITHEFT_STATE.get("system_status"));
-    stored[SMS_STATUS_CMDS[rawBody]] = (rawBody === "ARM" || rawBody === "IMMOBILIZE");
-    stored.ts = Date.now();
-    await env.ANTITHEFT_STATE.put("system_status", JSON.stringify(stored));
-  }
-
   return twiml(`Command queued: ${rawBody}`);
 }
 
@@ -940,16 +930,6 @@ async function handleCommandsDispatch(request, env) {
   // Write to KV — sole command path for both dashboard and SMS.
   const id = await enqueueCommand(env, body, "dashboard");
   const writeTs = Date.now();
-
-  // Optimistic status update — lets the dashboard confirm the command
-  // via GET /status without waiting for the full ntfy→cron round-trip.
-  const STATUS_CMDS = { ARM: "armed", DISARM: "armed", IMMOBILIZE: "immobilized", RESTORE: "immobilized" };
-  if (body in STATUS_CMDS) {
-    const stored = parseSystemStatus(await env.ANTITHEFT_STATE.get("system_status"));
-    stored[STATUS_CMDS[body]] = (body === "ARM" || body === "IMMOBILIZE");
-    stored.ts = writeTs;
-    await env.ANTITHEFT_STATE.put("system_status", JSON.stringify(stored));
-  }
 
   return corsJson({ status: "queued", command: body, id, writeTs });
 }

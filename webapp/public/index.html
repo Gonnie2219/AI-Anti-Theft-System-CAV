@@ -56,6 +56,7 @@
   .pill-armed { background: var(--armed-bg); color: var(--armed-text); border: 1px solid var(--armed); }
   .pill-disarmed { background: var(--disarmed-bg); color: var(--disarmed-text); border: 1px solid var(--disarmed); }
   .pill-unknown { background: var(--border); color: var(--text-muted); border: 1px solid var(--text-muted); }
+  .pill-pending { background: #1a1a2e; color: #facc15; border: 1px solid #facc15; animation: pillPulse 1.5s ease-in-out infinite; }
   .pill-offline { background: #1e293b; color: #475569; border: 1px solid #334155; }
   .last-seen { margin-left: auto; font-size: 0.75rem; color: var(--text-muted); white-space: nowrap; }
   .last-seen.offline { color: #ef4444; }
@@ -555,15 +556,13 @@ async function pollWorkerStatus() {
     // Only apply if the Worker has a real timestamp (cron has seen status messages)
     if (!data.ts) return;
 
-    // If a command is pending, use polled status to confirm it
-    // (faster and more reliable than waiting for SSE via ntfy)
+    // While a command is pending, only confirm if KV reflects new state.
+    // Do NOT revert the pill to old state (prevents flicker).
     if (pendingCmd) {
-      var confirmed = false;
-      if (pendingCmd.cmd === 'ARM' && data.armed) confirmed = true;
-      if (pendingCmd.cmd === 'DISARM' && !data.armed) confirmed = true;
-      if (pendingCmd.cmd === 'IMMOBILIZE' && data.immobilized) confirmed = true;
-      if (pendingCmd.cmd === 'RESTORE' && !data.immobilized) confirmed = true;
-      if (confirmed) confirmCommand();
+      if (pendingCmd.cmd === 'ARM' && data.armed) { confirmCommand(); updateStatus('ARMED'); }
+      else if (pendingCmd.cmd === 'DISARM' && !data.armed) { confirmCommand(); updateStatus('DISARMED'); }
+      else if (pendingCmd.cmd === 'IMMOBILIZE' && data.immobilized) { confirmCommand(); updateIgnition(true); }
+      else if (pendingCmd.cmd === 'RESTORE' && !data.immobilized) { confirmCommand(); updateIgnition(false); }
       return; // Don't correct status while a command is pending
     }
 
@@ -657,11 +656,6 @@ function handleNotification(msg, historical) {
   }
 
   var bodyLower = body.toLowerCase();
-  if (bodyLower.indexOf('disarmed') >= 0) {
-    updateStatus('DISARMED');
-  } else if (bodyLower.indexOf('armed') >= 0) {
-    updateStatus('ARMED');
-  }
 
   // Ignition state detection
   if (bodyLower.indexOf('immobilized') >= 0) {
@@ -745,6 +739,12 @@ function updateStatus(status) {
   isOffline = false;
   document.getElementById('offline-banner').style.display = 'none';
   updateLastSeen();
+}
+
+function showPendingPill(text) {
+  var pill = document.getElementById('status-pill');
+  pill.textContent = text;
+  pill.className = 'status-pill pill-pending';
 }
 
 function updateIgnition(immobilized) {
@@ -1146,8 +1146,8 @@ async function sendCommand(cmd, btn) {
   btn.classList.add('pending');
   btn.disabled = true;
 
-  if (cmd === 'ARM') updateStatus('ARMED');
-  else if (cmd === 'DISARM') updateStatus('DISARMED');
+  if (cmd === 'ARM') showPendingPill('ARMING...');
+  else if (cmd === 'DISARM') showPendingPill('DISARMING...');
   else if (cmd === 'IMMOBILIZE') updateIgnition(true);
   else if (cmd === 'RESTORE') updateIgnition(false);
 
@@ -1168,15 +1168,8 @@ async function sendCommand(cmd, btn) {
     return;
   }
 
-  // State-changing commands: confirm immediately on successful dispatch.
-  // The command pipeline is proven reliable (SMS uses the same queue).
-  // The /status poll (every 5s) will correct if anything goes wrong.
-  if (cmd === 'ARM' || cmd === 'DISARM' || cmd === 'IMMOBILIZE' || cmd === 'RESTORE') {
-    confirmCommand();
-    return;
-  }
-
-  // GPS/PHOTO/STATUS: wait for SSE confirmation or timeout (60s to account for KV cache lag)
+  // All commands: confirmed by /status poll (ARM/DISARM) or SSE (GPS/PHOTO/STATUS).
+  // 60s timeout covers KV cache lag + device response time.
   pendingCmd.timer = setTimeout(function() { markCommandFailed('No response'); }, 60000);
 }
 
@@ -1187,12 +1180,10 @@ function markCommandFailed(reason) {
   pendingCmd = null;
 
   if (p.cmd === 'ARM' || p.cmd === 'DISARM') {
-    if (p.previousStatus) updateStatus(p.previousStatus);
-    else {
-      var pill = document.getElementById('status-pill');
-      pill.textContent = 'Unknown';
-      pill.className = 'status-pill pill-unknown';
-    }
+    // Don't assert a stale state — show Unknown until next /status confirms
+    var pill = document.getElementById('status-pill');
+    pill.textContent = 'Unknown';
+    pill.className = 'status-pill pill-unknown';
   }
   if (p.cmd === 'IMMOBILIZE' || p.cmd === 'RESTORE') {
     updateIgnition(p.previousIgnition);
