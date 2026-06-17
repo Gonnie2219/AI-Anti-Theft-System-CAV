@@ -222,7 +222,6 @@
       <button id="push-test" onclick="sendPushTest()" style="display:none;background:none;border:1px solid #1e293b;border-radius:6px;color:#94a3b8;font-size:0.7rem;padding:0.25rem 0.5rem;cursor:pointer;font-family:inherit">Send test</button>
     </span>
     <span id="push-hint" style="display:none;font-size:0.7rem;color:#64748b;white-space:nowrap"></span>
-    <a href="/opt-in" style="margin-left:auto;font-size:0.7rem;color:#64748b;text-decoration:none;white-space:nowrap" onmouseover="this.style.color='#0ea5e9'" onmouseout="this.style.color='#64748b'">SMS Opt-In</a>
   </div>
 
   <div id="offline-banner" class="offline-banner"></div>
@@ -911,6 +910,7 @@ function parseModemTimestamp(ts) {
 
 function formatBody(text) {
   let s = escapeHtml(text);
+  s = s.replace(/\bSMS_REPLY\b/g, 'REPLY');
   // Convert modem timestamps (Time: / TS:) to local time
   s = s.replace(/((?:Time|TS):)\s*(\d{2}\/\d{2}\/\d{2},\d{2}:\d{2}:\d{2}(?:[+-]\d{1,2})?)/g, function(match, label, raw) {
     var d = parseModemTimestamp(raw);
