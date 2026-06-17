@@ -1211,13 +1211,14 @@ async function sendCommand(cmd, btn) {
     return;
   }
 
+  var cmdTimeout = (cmd === 'IMMOBILIZE' || cmd === 'RESTORE') ? 120000 : 60000;
   pendingAction.timer = setTimeout(function() {
     if (cmd === 'ARM' || cmd === 'DISARM')
       applyObservation({type:'timeout', dim:'status'});
     else if (cmd === 'IMMOBILIZE' || cmd === 'RESTORE')
       applyObservation({type:'timeout', dim:'ignition'});
     failAction('No response');
-  }, 60000);
+  }, cmdTimeout);
 }
 
 function confirmAction() {
