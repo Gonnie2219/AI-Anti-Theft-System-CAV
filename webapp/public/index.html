@@ -440,10 +440,12 @@ let map, marker;
 let gpsTrail = [];
 let trailLine = null;
 let lastMessageTime = null;
-let lastKnownStatus = null;
-let lastIgnitionState = false;
-let isOffline = false;
-let staleGuardTs = 0;
+var pillState = {
+  status: 'UNKNOWN', statusTs: 0,
+  ignition: 'UNKNOWN', ignitionTs: 0,
+  pendingStatus: null, pendingIgnition: null,
+  offline: false
+};
 const seenMsgIds = new Set();
 
 // Speed / motion state
@@ -459,15 +461,10 @@ function initDashboard() {
     attribution: '&copy; <a href="https://carto.com/">CARTO</a>'
   }).addTo(map);
 
-  // Restore persisted state
-  lastKnownStatus = localStorage.getItem('lastKnownStatus');
+  // Restore non-pill persisted state; pills start UNKNOWN (seeded by loadHistory R6)
   var savedTime = localStorage.getItem('lastMessageTime');
   if (savedTime) lastMessageTime = parseInt(savedTime);
-  if (lastKnownStatus) updateStatus(lastKnownStatus);
-
-  var savedIgnition = localStorage.getItem('lastIgnitionState');
-  if (savedIgnition === 'true') updateIgnition(true);
-  else updateIgnition(false);
+  renderPills();
 
   var savedGPS = localStorage.getItem('lastGPS');
   if (savedGPS) {
@@ -517,10 +514,7 @@ function initDashboard() {
       } catch (err) { /* ignore non-JSON */ }
     });
     evtSource.onerror = function() { showToast('Connection lost \u2014 reconnecting\u2026'); };
-    evtSource.onopen = function() {
-      showToast('Connected');
-      if (lastKnownStatus && !isOffline) updateStatus(lastKnownStatus);
-    };
+    evtSource.onopen = function() { showToast('Connected'); };
   });
 
   setInterval(checkOfflineStatus, 30000);
@@ -532,6 +526,8 @@ function initDashboard() {
 }
 
 async function loadHistory() {
+  var latestStatusValue = null, latestStatusTs = 0;
+  var latestIgnitionValue = null, latestIgnitionTs = 0;
   try {
     var resp = await fetch('https://ntfy.sh/' + ALERT_TOPIC + '/json?poll=1&since=24h');
     if (!resp.ok) return;
@@ -541,12 +537,22 @@ async function loadHistory() {
       try {
         var msg = JSON.parse(lines[i]);
         if (msg.event !== 'message') continue;
+        // Track latest System state message for pill seeding (R6)
+        var hBody = (msg.message || '').toLowerCase();
+        var hTs = (msg.time || 0) * 1000;
+        if (hBody.startsWith('system armed') && hTs > latestStatusTs) { latestStatusValue = 'ARMED'; latestStatusTs = hTs; }
+        else if (hBody.startsWith('system disarmed') && hTs > latestStatusTs) { latestStatusValue = 'DISARMED'; latestStatusTs = hTs; }
+        else if (hBody.startsWith('system immobilized') && hTs > latestIgnitionTs) { latestIgnitionValue = 'IMMOBILIZED'; latestIgnitionTs = hTs; }
+        else if (hBody.startsWith('system ignition_ok') && hTs > latestIgnitionTs) { latestIgnitionValue = 'OK'; latestIgnitionTs = hTs; }
         handleNotification(msg, true);
       } catch(e) {}
     }
   } catch(e) {
     console.error('[History]', e);
   }
+  // R6: Seed pill state from history (kv-tier authority)
+  if (latestStatusValue) applyObservation({type:'kv', statusValue:latestStatusValue, ignitionValue:pillState.ignition, ts:latestStatusTs});
+  if (latestIgnitionValue) applyObservation({type:'kv', statusValue:pillState.status, ignitionValue:latestIgnitionValue, ts:latestIgnitionTs});
 }
 
 async function pollWorkerStatus() {
@@ -554,37 +560,14 @@ async function pollWorkerStatus() {
     var resp = await fetch(WORKER_URL + '/status');
     if (!resp.ok) return;
     var data = await resp.json();
-    // Only apply if the Worker has a real timestamp (cron has seen status messages)
     if (!data.ts) return;
-
-    // While a command is pending, only confirm if KV reflects new state.
-    // Do NOT revert the pill to old state (prevents flicker).
-    if (pendingCmd) {
-      if (pendingCmd.cmd === 'ARM' && data.armed) { confirmCommand(); updateStatus('ARMED'); }
-      else if (pendingCmd.cmd === 'DISARM' && !data.armed) { confirmCommand(); updateStatus('DISARMED'); }
-      else if (pendingCmd.cmd === 'IMMOBILIZE' && data.immobilized) { confirmCommand(); updateIgnition(true); }
-      else if (pendingCmd.cmd === 'RESTORE' && !data.immobilized) { confirmCommand(); updateIgnition(false); }
-      return; // Don't correct status while a command is pending
-    }
-
-    // After a timeout, KV may still be stale. Don't assert until KV
-    // timestamp proves it reflects post-timeout device state.
-    if (staleGuardTs && (!data.ts || data.ts < staleGuardTs)) return;
-    staleGuardTs = 0;
-
-    var workerArmed = data.armed ? 'ARMED' : 'DISARMED';
-    if (workerArmed !== lastKnownStatus) {
-      console.log('[Status poll] correcting: ' + lastKnownStatus + ' -> ' + workerArmed);
-      updateStatus(workerArmed);
-    }
-    var workerImmobilized = !!data.immobilized;
-    if (workerImmobilized !== lastIgnitionState) {
-      console.log('[Status poll] correcting ignition: ' + lastIgnitionState + ' -> ' + workerImmobilized);
-      updateIgnition(workerImmobilized);
-    }
-  } catch(e) {
-    // Silent — SSE is the primary path, this is the safety net
-  }
+    applyObservation({
+      type: 'kv',
+      statusValue: data.armed ? 'ARMED' : 'DISARMED',
+      ignitionValue: data.immobilized ? 'IMMOBILIZED' : 'OK',
+      ts: data.ts
+    });
+  } catch(e) {}
 }
 
 function handleNotification(msg, historical) {
@@ -606,10 +589,6 @@ function handleNotification(msg, historical) {
   } else if (!historical) {
     lastMessageTime = Date.now();
     localStorage.setItem('lastMessageTime', lastMessageTime);
-  }
-
-  if (!historical && isOffline && lastKnownStatus) {
-    updateStatus(lastKnownStatus);
   }
 
   const title = msg.title || '';
@@ -647,9 +626,9 @@ function handleNotification(msg, historical) {
     updateImmobilizeButton();
     if (suLat !== null && suLon !== null) updateMapPosition(suLat, suLon);
     // Status-push with coords clears a pending GPS command
-    if (!historical && pendingCmd && pendingCmd.cmd === 'GPS' && suLat !== null && suLon !== null) {
+    if (!historical && pendingAction && pendingAction.cmd === 'GPS' && suLat !== null && suLon !== null) {
       console.log('[CmdClear] GPS cleared by status-push coords:', suLat, suLon);
-      confirmCommand();
+      confirmAction();
     }
     if (motionState === 'STATIONARY') dismissSafetyLockout();
     return;
@@ -663,42 +642,40 @@ function handleNotification(msg, historical) {
 
   var bodyLower = body.toLowerCase();
 
-  // --- Reply-gated pending-command clearing ---
-  // Lenient on body, strict on kind. Log every match for debugging.
-  if (!historical && pendingCmd) {
+  // --- Reply-gated pending-command clearing (GPS/PHOTO/STATUS only) ---
+  // Pill commands (ARM/DISARM/IMMOBILIZE/RESTORE) are resolved by applyObservation R1/R2.
+  if (!historical && pendingAction) {
     var matched = false;
-    if (pendingCmd.cmd === 'GPS') {
-      // GPS reply: "SMS_REPLY: GPS:..." or any message with "Location:" or status-push coords
+    if (pendingAction.cmd === 'GPS') {
       if (body.indexOf('Location:') >= 0 || body.indexOf('SMS_REPLY: GPS:') >= 0) {
         console.log('[CmdClear] GPS cleared by SSE body:', body.slice(0, 120));
         matched = true;
       }
     }
-    if (pendingCmd.cmd === 'PHOTO') {
-      // Photo reply: any attachment or "SMS_REPLY:" mentioning photo
+    if (pendingAction.cmd === 'PHOTO') {
       if (attachment || body.indexOf('Photo') >= 0 || (body.indexOf('SMS_REPLY:') >= 0 && body.toLowerCase().indexOf('photo') >= 0)) {
         console.log('[CmdClear] PHOTO cleared by SSE body:', body.slice(0, 120), 'attachment:', !!attachment);
         matched = true;
       }
     }
-    if (pendingCmd.cmd === 'STATUS') {
+    if (pendingAction.cmd === 'STATUS') {
       if (body.indexOf('SMS_REPLY:') >= 0 || bodyLower.indexOf('armed') >= 0 || bodyLower.indexOf('disarmed') >= 0) {
         console.log('[CmdClear] STATUS cleared by SSE body:', body.slice(0, 120));
         matched = true;
       }
     }
-    if (matched) confirmCommand();
+    if (matched) confirmAction();
   }
 
-  // --- Always-on live state reconcile ---
-  // Authoritative "System X" messages update pill unconditionally on live SSE,
-  // even with no pending command. Handles: fast confirm, late arrival after
-  // timeout, unsolicited state changes.  History excluded (stale bodies).
+  // --- Always-on live state reconcile (R1) ---
+  // Authoritative "System X" messages → applyObservation, which clears
+  // any relevant pending + confirms the button via confirmAction().
   if (!historical) {
-    if (bodyLower.startsWith('system armed'))            { confirmCommand(); updateStatus('ARMED'); }
-    else if (bodyLower.startsWith('system disarmed'))    { confirmCommand(); updateStatus('DISARMED'); }
-    else if (bodyLower.startsWith('system immobilized')) { confirmCommand(); updateIgnition(true); }
-    else if (bodyLower.startsWith('system ignition_ok')) { confirmCommand(); updateIgnition(false); }
+    var obsTs = msg.time * 1000;
+    if (bodyLower.startsWith('system armed'))            applyObservation({type:'sse_live', dim:'status', value:'ARMED', ts:obsTs});
+    else if (bodyLower.startsWith('system disarmed'))    applyObservation({type:'sse_live', dim:'status', value:'DISARMED', ts:obsTs});
+    else if (bodyLower.startsWith('system immobilized')) applyObservation({type:'sse_live', dim:'ignition', value:'IMMOBILIZED', ts:obsTs});
+    else if (bodyLower.startsWith('system ignition_ok')) applyObservation({type:'sse_live', dim:'ignition', value:'OK', ts:obsTs});
   }
 
   const locMatch = body.match(/Location:\s*([-\d.]+),([-\d.]+)/);
@@ -725,40 +702,109 @@ function handleNotification(msg, historical) {
   }
 }
 
-function updateStatus(status) {
-  const pill = document.getElementById('status-pill');
-  pill.textContent = status;
-  if (status === 'ARMED') {
-    pill.className = 'status-pill pill-armed';
-  } else if (status === 'DISARMED') {
-    pill.className = 'status-pill pill-disarmed';
+function renderPills() {
+  var sp = document.getElementById('status-pill');
+  var ip = document.getElementById('ignition-pill');
+
+  // Status pill — offline visual override (does NOT mutate pillState.status)
+  if (pillState.offline) {
+    sp.textContent = 'OFFLINE';
+    sp.className = 'status-pill pill-offline';
+  } else if (pillState.pendingStatus) {
+    sp.textContent = pillState.pendingStatus.cmd === 'ARM' ? 'ARMING...' : 'DISARMING...';
+    sp.className = 'status-pill pill-pending';
+  } else if (pillState.status === 'ARMED') {
+    sp.textContent = 'ARMED';
+    sp.className = 'status-pill pill-armed';
+  } else if (pillState.status === 'DISARMED') {
+    sp.textContent = 'DISARMED';
+    sp.className = 'status-pill pill-disarmed';
   } else {
-    pill.className = 'status-pill pill-unknown';
+    sp.textContent = 'Unknown';
+    sp.className = 'status-pill pill-unknown';
   }
-  lastKnownStatus = status;
-  localStorage.setItem('lastKnownStatus', status);
-  isOffline = false;
-  document.getElementById('offline-banner').style.display = 'none';
+
+  // Ignition pill — offline shows neutral/unknown (does NOT mutate pillState.ignition)
+  if (pillState.offline) {
+    ip.textContent = 'Unknown';
+    ip.className = 'status-pill pill-unknown';
+  } else if (pillState.pendingIgnition) {
+    ip.textContent = pillState.pendingIgnition.cmd === 'IMMOBILIZE' ? 'IMMOBILIZING...' : 'RESTORING...';
+    ip.className = 'status-pill pill-pending';
+  } else if (pillState.ignition === 'IMMOBILIZED') {
+    ip.textContent = 'IMMOBILIZED';
+    ip.className = 'status-pill pill-ign-cut';
+  } else if (pillState.ignition === 'OK') {
+    ip.textContent = 'IGNITION OK';
+    ip.className = 'status-pill pill-ign-ok';
+  } else {
+    ip.textContent = 'Unknown';
+    ip.className = 'status-pill pill-unknown';
+  }
+
   updateLastSeen();
 }
 
-function showPendingPill(text) {
-  var pill = document.getElementById('status-pill');
-  pill.textContent = text;
-  pill.className = 'status-pill pill-pending';
-}
-
-function updateIgnition(immobilized) {
-  var pill = document.getElementById('ignition-pill');
-  if (immobilized) {
-    pill.textContent = 'IMMOBILIZED';
-    pill.className = 'status-pill pill-ign-cut';
-  } else {
-    pill.textContent = 'IGNITION OK';
-    pill.className = 'status-pill pill-ign-ok';
+function applyObservation(obs) {
+  if (obs.type === 'sse_live') {
+    // R1: Live SSE "System X" — highest authority
+    var dim = obs.dim;
+    var pendingKey = dim === 'status' ? 'pendingStatus' : 'pendingIgnition';
+    pillState[dim] = obs.value;
+    pillState[dim + 'Ts'] = obs.ts;
+    pillState.offline = false;
+    if (pillState[pendingKey]) {
+      pillState[pendingKey] = null;
+      var pillCmds = dim === 'status' ? ['ARM', 'DISARM'] : ['IMMOBILIZE', 'RESTORE'];
+      if (pendingAction && pillCmds.indexOf(pendingAction.cmd) >= 0) confirmAction();
+    }
+    document.getElementById('offline-banner').style.display = 'none';
+    renderPills();
+  } else if (obs.type === 'kv') {
+    // R2: KV poll — per dimension, only if value changed AND fresher
+    var changed = false;
+    if (obs.statusValue !== pillState.status && obs.ts > pillState.statusTs) {
+      pillState.status = obs.statusValue;
+      pillState.statusTs = obs.ts;
+      changed = true;
+      if (pillState.pendingStatus && obs.ts > pillState.pendingStatus.tsAtSend) {
+        pillState.pendingStatus = null;
+        if (pendingAction && (pendingAction.cmd === 'ARM' || pendingAction.cmd === 'DISARM')) confirmAction();
+      }
+    }
+    if (obs.ignitionValue !== pillState.ignition && obs.ts > pillState.ignitionTs) {
+      pillState.ignition = obs.ignitionValue;
+      pillState.ignitionTs = obs.ts;
+      changed = true;
+      if (pillState.pendingIgnition && obs.ts > pillState.pendingIgnition.tsAtSend) {
+        pillState.pendingIgnition = null;
+        if (pendingAction && (pendingAction.cmd === 'IMMOBILIZE' || pendingAction.cmd === 'RESTORE')) confirmAction();
+      }
+    }
+    if (changed) renderPills();
+  } else if (obs.type === 'command') {
+    // R3: Command click — set pending, no confident value written
+    var pendingKey = obs.dim === 'status' ? 'pendingStatus' : 'pendingIgnition';
+    pillState[pendingKey] = { cmd: obs.cmd, sentAt: Date.now(), tsAtSend: pillState[obs.dim + 'Ts'] };
+    renderPills();
+  } else if (obs.type === 'timeout') {
+    // R4: Pending command timed out
+    var pendingKey = obs.dim === 'status' ? 'pendingStatus' : 'pendingIgnition';
+    var tsKey = obs.dim + 'Ts';
+    if (!pillState[pendingKey]) return;
+    if (pillState[tsKey] > pillState[pendingKey].tsAtSend) {
+      pillState[pendingKey] = null;
+    } else {
+      pillState[pendingKey] = null;
+      pillState[obs.dim] = 'UNKNOWN';
+      pillState[tsKey] = 0;
+    }
+    renderPills();
+  } else if (obs.type === 'offline') {
+    // R5: Offline — visual override only, status/ignition values preserved
+    pillState.offline = true;
+    renderPills();
   }
-  lastIgnitionState = immobilized;
-  localStorage.setItem('lastIgnitionState', immobilized ? 'true' : 'false');
 }
 
 function updateLastSeen() {
@@ -771,18 +817,14 @@ function updateLastSeen() {
   else if (mins < 60) el.textContent = mins + 'm ago';
   else if (hrs < 24) el.textContent = hrs + 'h ' + (mins % 60) + 'm ago';
   else el.textContent = Math.floor(hrs / 24) + 'd ago';
-  el.className = isOffline ? 'last-seen offline' : 'last-seen';
+  el.className = pillState.offline ? 'last-seen offline' : 'last-seen';
 }
 
 function checkOfflineStatus() {
   if (!lastMessageTime) return;
   const elapsed = Date.now() - lastMessageTime;
   if (elapsed > 900000) {
-    isOffline = true;
-    const pill = document.getElementById('status-pill');
-    pill.textContent = 'OFFLINE';
-    pill.className = 'status-pill pill-offline';
-    updateLastSeen();
+    if (!pillState.offline) applyObservation({type:'offline'});
 
     const totalMins = Math.floor(elapsed / 60000);
     const hrs = Math.floor(totalMins / 60);
@@ -798,7 +840,7 @@ function checkOfflineStatus() {
     const dateStr = days[dt.getDay()] + ' ' + months[dt.getMonth()] + ' ' + dt.getDate() + ', ' + hr + ':' + String(dt.getMinutes()).padStart(2, '0') + ' ' + ampm;
 
     var html = 'Last seen ' + timeAgo;
-    if (lastKnownStatus) html += ' &middot; Was ' + lastKnownStatus;
+    if (pillState.status !== 'UNKNOWN') html += ' &middot; Was ' + pillState.status;
     html += '<br>Last contact: ' + dateStr;
 
     var savedGPS = localStorage.getItem('lastGPS');
@@ -1017,7 +1059,7 @@ function updateImmobilizeButton() {
   var btn = document.getElementById('btn-immobilize');
   var warning = document.getElementById('immobilize-warning');
   if (!btn || !warning) return;
-  if (pendingCmd && pendingCmd.cmd === 'IMMOBILIZE') return;
+  if (pendingAction && pendingAction.cmd === 'IMMOBILIZE') return;
 
   var isMoving = motionState === 'MOVING' || (currentSpeedMph !== null && currentSpeedMph > 2);
   var isStale = speedUpdatedAt && (Date.now() - speedUpdatedAt > 10 * 60 * 1000);
@@ -1121,13 +1163,12 @@ function showToast(message) {
   toastTimer = setTimeout(function() { toast.classList.remove('show'); toastTimer = null; }, 3000);
 }
 
-// --- Optimistic Command UI ---
-var pendingCmd = null;
-var BTN_LABELS = { ARM: 'Arm', DISARM: 'Disarm', GPS: 'GPS', PHOTO: 'Photo', IMMOBILIZE: 'Immobilize', RESTORE: 'Restore' };
+// --- Command UI (pill-pending + button-pending in lockstep) ---
+var pendingAction = null;
 var BTN_PENDING = { ARM: 'Arming\u2026', DISARM: 'Disarming\u2026', GPS: 'Locating\u2026', PHOTO: 'Capturing\u2026', IMMOBILIZE: 'Immobilizing\u2026', RESTORE: 'Restoring\u2026' };
 
 async function sendCommand(cmd, btn) {
-  if (pendingCmd) return;
+  if (pendingAction) return;
 
   // Safety check for IMMOBILIZE
   if (cmd === 'IMMOBILIZE') {
@@ -1140,23 +1181,20 @@ async function sendCommand(cmd, btn) {
   }
 
   var originalText = btn.innerHTML;
-  var previousStatus = lastKnownStatus;
-  var previousIgnition = lastIgnitionState;
 
   btn.innerHTML = '<span class="spinner"></span>' + BTN_PENDING[cmd];
   btn.classList.add('pending');
   btn.disabled = true;
 
-  if (cmd === 'ARM') showPendingPill('ARMING...');
-  else if (cmd === 'DISARM') showPendingPill('DISARMING...');
-  else if (cmd === 'IMMOBILIZE') updateIgnition(true);
-  else if (cmd === 'RESTORE') updateIgnition(false);
+  // R3: Set pill pending for pill-relevant commands (no optimistic confident value)
+  if (cmd === 'ARM' || cmd === 'DISARM')
+    applyObservation({type:'command', dim:'status', cmd:cmd});
+  else if (cmd === 'IMMOBILIZE' || cmd === 'RESTORE')
+    applyObservation({type:'command', dim:'ignition', cmd:cmd});
 
-  pendingCmd = { cmd: cmd, btn: btn, originalText: originalText, previousStatus: previousStatus, previousIgnition: previousIgnition, timer: null };
+  pendingAction = { cmd: cmd, btn: btn, originalText: originalText, timer: null };
 
   try {
-    // Post to Worker KV queue (sole command path).
-    // CMD_SECRET authenticates over HTTPS — never exposed to public channels.
     var resp = await fetch(WORKER_URL + '/commands/dispatch', {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + CMD_SECRET },
@@ -1165,38 +1203,46 @@ async function sendCommand(cmd, btn) {
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     showToast('Command sent: ' + cmd);
   } catch (err) {
-    markCommandFailed('Send failed');
+    if (cmd === 'ARM' || cmd === 'DISARM')
+      applyObservation({type:'timeout', dim:'status'});
+    else if (cmd === 'IMMOBILIZE' || cmd === 'RESTORE')
+      applyObservation({type:'timeout', dim:'ignition'});
+    failAction('Send failed');
     return;
   }
 
-  // All commands: confirmed by /status poll (ARM/DISARM) or SSE (GPS/PHOTO/STATUS).
-  // 60s timeout covers KV cache lag + device response time.
-  pendingCmd.timer = setTimeout(function() { markCommandFailed('No response'); }, 60000);
+  pendingAction.timer = setTimeout(function() {
+    if (cmd === 'ARM' || cmd === 'DISARM')
+      applyObservation({type:'timeout', dim:'status'});
+    else if (cmd === 'IMMOBILIZE' || cmd === 'RESTORE')
+      applyObservation({type:'timeout', dim:'ignition'});
+    failAction('No response');
+  }, 60000);
 }
 
-function markCommandFailed(reason) {
-  if (!pendingCmd) return;
-  clearTimeout(pendingCmd.timer);
-  var p = pendingCmd;
-  pendingCmd = null;
+function confirmAction() {
+  if (!pendingAction) return;
+  clearTimeout(pendingAction.timer);
+  var p = pendingAction;
+  pendingAction = null;
+  p.btn.classList.remove('pending');
+  p.btn.disabled = false;
+  p.btn.innerHTML = p.originalText;
+  updateImmobilizeButton();
+  // Confirm flash after renderPills sets className
+  var pillId = (p.cmd === 'IMMOBILIZE' || p.cmd === 'RESTORE') ? 'ignition-pill' : 'status-pill';
+  setTimeout(function() {
+    var pill = document.getElementById(pillId);
+    pill.classList.add('confirming');
+    setTimeout(function() { pill.classList.remove('confirming'); }, 600);
+  }, 0);
+}
 
-  if (p.cmd === 'ARM' || p.cmd === 'DISARM') {
-    var pill = document.getElementById('status-pill');
-    pill.textContent = 'Unknown';
-    pill.className = 'status-pill pill-unknown';
-    lastKnownStatus = null;
-    localStorage.removeItem('lastKnownStatus');
-    staleGuardTs = Date.now();
-  }
-  if (p.cmd === 'IMMOBILIZE' || p.cmd === 'RESTORE') {
-    var ipill = document.getElementById('ignition-pill');
-    ipill.textContent = 'IGNITION ?';
-    ipill.className = 'status-pill pill-pending';
-    lastIgnitionState = null;
-    localStorage.removeItem('lastIgnitionState');
-    staleGuardTs = Date.now();
-  }
-
+function failAction(reason) {
+  if (!pendingAction) return;
+  clearTimeout(pendingAction.timer);
+  var p = pendingAction;
+  pendingAction = null;
   p.btn.classList.remove('pending');
   p.btn.classList.add('failed');
   p.btn.disabled = false;
@@ -1207,22 +1253,6 @@ function markCommandFailed(reason) {
     p.btn.onclick = function() { sendCommand(p.cmd, p.btn); };
     sendCommand(p.cmd, p.btn);
   };
-  updateImmobilizeButton();
-}
-
-function confirmCommand() {
-  if (!pendingCmd) return;
-  clearTimeout(pendingCmd.timer);
-  var p = pendingCmd;
-  pendingCmd = null;
-
-  p.btn.classList.remove('pending');
-  p.btn.disabled = false;
-  p.btn.innerHTML = p.originalText;
-
-  var pill = document.getElementById('status-pill');
-  pill.classList.add('confirming');
-  setTimeout(function() { pill.classList.remove('confirming'); }, 600);
   updateImmobilizeButton();
 }
 
@@ -1248,7 +1278,7 @@ function showConfirmDialog(message, onConfirm, warningText) {
 }
 
 function confirmImmobilize() {
-  if (pendingCmd) return;
+  if (pendingAction) return;
 
   var isMoving = motionState === 'MOVING' || (currentSpeedMph !== null && currentSpeedMph > 2);
   if (isMoving) {
@@ -1283,7 +1313,7 @@ function confirmImmobilize() {
 }
 
 function confirmRestore() {
-  if (pendingCmd) return;
+  if (pendingAction) return;
   showConfirmDialog("Are you sure? This will restore the vehicle's ignition.", function() {
     sendCommand('RESTORE', document.getElementById('btn-restore'));
   });
