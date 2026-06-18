@@ -292,12 +292,45 @@
 <div id="toast"></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<script src="config.js"></script>
 <script>
+if (!window.MQTT_CONFIG) { console.warn('[mqtt] config.js missing — MQTT disabled, using HTTP fallback'); }
 const ALERT_TOPIC = 'antitheft-gonnie-2219';
 const WORKER_URL = 'https://antitheft-whatsapp-bridge.gonnie2219.workers.dev';
 const EXPECTED_HASH = '90508d9e1b28c32e484c03679d4939618ae1c31424a25a5f0483a93012be0a42';
 const VAPID_PUBLIC_KEY = 'BAEaWU5rTz4gL4Ksprzmr3VLWWEFR4cr9ZfZkmbhuvQwT2WpM8PGjXeKCqIXH2chOpOe1WZgFTOuBCu6ZYKJ-sA';
 var CMD_SECRET = ''; // set on login, sent with all command requests
+
+// MQTT-over-WebSocket: publish commands directly to HiveMQ so the LILYGO
+// receives them in ~2-5s instead of the 40-60s HTTP-poll path.
+// Credentials loaded from config.js (gitignored).
+var mqttClient = null;
+
+function initMqtt() {
+  if (!window.MQTT_CONFIG) return;
+  if (typeof mqtt === 'undefined') {
+    console.warn('[mqtt] mqtt.js not loaded (CDN blocked?), using HTTP fallback');
+    return;
+  }
+  try {
+    mqttClient = mqtt.connect(window.MQTT_CONFIG.wssUrl, {
+      username: window.MQTT_CONFIG.pubUser,
+      password: window.MQTT_CONFIG.pubPass,
+      clientId: 'antitheft-dashboard-' + Math.random().toString(16).slice(2, 10),
+      clean: true,
+      connectTimeout: 8000,
+      reconnectPeriod: 4000,
+      keepalive: 30
+    });
+    mqttClient.on('connect', function() { console.log('[mqtt] connected'); });
+    mqttClient.on('error', function(err) { console.warn('[mqtt] error:', err.message); });
+    mqttClient.on('close', function() { console.warn('[mqtt] disconnected'); });
+  } catch (e) {
+    console.warn('[mqtt] init failed:', e.message);
+    mqttClient = null;
+  }
+}
 
 // Register the push-only service worker. try/catch keeps environments
 // without SW support (e.g. the Expo WebView) completely unaffected.
@@ -326,6 +359,7 @@ document.getElementById('login-form').addEventListener('submit', async function(
     document.getElementById('dashboard').style.display = 'block';
     initDashboard();
     initPushUI();
+    initMqtt();
     setTimeout(function() { if (map) map.invalidateSize(); }, 200);
   } else {
     document.getElementById('login-error').style.display = 'block';
@@ -1194,21 +1228,38 @@ async function sendCommand(cmd, btn) {
 
   pendingAction = { cmd: cmd, btn: btn, originalText: originalText, timer: null };
 
-  try {
-    var resp = await fetch(WORKER_URL + '/commands/dispatch', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + CMD_SECRET },
-      body: cmd
-    });
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    showToast('Command sent: ' + cmd);
-  } catch (err) {
-    if (cmd === 'ARM' || cmd === 'DISARM')
-      applyObservation({type:'timeout', dim:'status'});
-    else if (cmd === 'IMMOBILIZE' || cmd === 'RESTORE')
-      applyObservation({type:'timeout', dim:'ignition'});
-    failAction('Send failed');
-    return;
+  // MQTT-first, POST-fallback. Exactly one path per click — never both.
+  var sent = false;
+  if (mqttClient && mqttClient.connected) {
+    try {
+      await new Promise(function(resolve, reject) {
+        mqttClient.publish(window.MQTT_CONFIG.cmdTopic, cmd, { qos: 1 }, function(err) {
+          if (err) reject(err); else resolve();
+        });
+      });
+      sent = true;
+      showToast('Command sent: ' + cmd);
+    } catch (mqttErr) {
+      console.warn('[mqtt] publish failed, falling back to HTTP:', mqttErr);
+    }
+  }
+  if (!sent) {
+    try {
+      var resp = await fetch(WORKER_URL + '/commands/dispatch', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + CMD_SECRET },
+        body: cmd
+      });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      showToast('Command sent: ' + cmd);
+    } catch (err) {
+      if (cmd === 'ARM' || cmd === 'DISARM')
+        applyObservation({type:'timeout', dim:'status'});
+      else if (cmd === 'IMMOBILIZE' || cmd === 'RESTORE')
+        applyObservation({type:'timeout', dim:'ignition'});
+      failAction('Send failed');
+      return;
+    }
   }
 
   var cmdTimeout = (cmd === 'IMMOBILIZE' || cmd === 'RESTORE') ? 120000 : 60000;
