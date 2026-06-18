@@ -75,12 +75,13 @@ unsigned long lastAlarmTime = 0;
 #define DEBOUNCE_MS 5000
 
 // Image buffer (allocated once in setup; only written/read in alarm task on Core 0)
-#define IMG_BUF_SIZE 51200
+#define IMG_BUF_SIZE 65536
 uint8_t* imgBuffer = NULL;
 size_t imgSize = 0;
 // Outcome of the last receivePhotoFromCAM() call, for alert diagnostics:
 // "PHOTO_OK <bytes>" / "CAM_NO_RESPONSE" / "CAM_PARTIAL <got>/<expected>" /
-// "CAM_GARBAGE" (non-empty lines received but no valid IMG header).
+// "CAM_GARBAGE" (IMG header with invalid/oversized byte count) /
+// "CAM_TIMEOUT" (text seen but no IMG header before 15 s deadline).
 String camStatus = "";
 
 // Alarm task control
@@ -134,7 +135,7 @@ void setup() {
 
   imgBuffer = (uint8_t*)malloc(IMG_BUF_SIZE);
   if (imgBuffer) {
-    Serial.println("Image buffer allocated (50 KB)");
+    Serial.println("Image buffer allocated (64 KB)");
   } else {
     Serial.println("Image buffer allocation FAILED");
   }
@@ -435,22 +436,27 @@ void alarmTask(void* param) {
   String reason = (char*)param;
   free(param);
 
-  // Request photo FIRST — the CAM captures (~2 s burst + SD writes) while
-  // the siren sounds, so evidence is taken before the intruder is warned.
-  Serial.println("  -> Requesting photo");
-  Serial2.println("PHOTO");
-
-  // Sound local alarm (buzzer + red LED, 3x) during CAM capture
-  Serial.println("Step 1.5: Sounding local alarm (buzzer + red LED)...");
+  // Sound local alarm (buzzer + red LED, 3x) — instant local deterrent
+  Serial.println("  -> Sounding local alarm (buzzer + red LED)...");
   soundLocalAlarm();
 
+  // Request photo AFTER buzzer so the Main is already reading when the CAM
+  // streams. The CAM begins its JPEG body ~600 ms after "PHOTO"; if the
+  // Main isn't draining Serial2 by then the 2048-byte RX buffer overflows.
+  Serial.println("  -> Requesting photo");
   imgSize = 0;
+  Serial2.println("PHOTO");
   bool photoOK = receivePhotoFromCAM();
   String camResult = camStatus;
 
-  // Single retry on any CAM failure: flush stale RX bytes, give the CAM 2 s
-  // to settle, re-request once. Hard cap of one retry.
-  if (!photoOK) {
+  // Single retry on genuine timeout only (CAM_TIMEOUT / CAM_PARTIAL /
+  // CAM_NO_RESPONSE). CAM_GARBAGE means the IMG header carried an
+  // invalid size — the CAM will produce the same frame again, so
+  // retrying is pointless.
+  // The 15 s receive timeout exceeds the CAM's full stream time (~3-4 s),
+  // so by the time a true timeout fires the CAM is idle and a retry
+  // cannot collide with an in-progress transfer.
+  if (!photoOK && camStatus != "CAM_GARBAGE") {
     Serial.println("  -> CAM failed (" + camResult + "), retrying once");
     while (Serial2.available()) Serial2.read();
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -541,9 +547,8 @@ void alarmTask(void* param) {
 
 // ── Receive Photo from CAM ──────────────────────────────────
 bool receivePhotoFromCAM() {
-  // Relaxed from 10s -> 15s. UART image transfer at 115200 baud takes
-  // ~5-6 seconds for a 50 KB JPEG; the extra 5s gives margin for CAM
-  // burst capture (3 frames + SD writes) before transfer starts.
+  // 15 s timeout. UART image transfer at 115200 baud takes ~4-6 seconds
+  // for a typical JPEG; the margin covers CAM warm-up + SD write.
   unsigned long timeout = millis() + 15000;
   bool gotHeader = false;
   bool sawText = false;  // any non-empty line seen (for CAM_GARBAGE vs NO_RESPONSE)
@@ -601,7 +606,7 @@ bool receivePhotoFromCAM() {
     camStatus = "CAM_PARTIAL " + String(imgSize) + "/" + String(expectedSize);
   } else {
     Serial.println("  Photo timeout (no header)");
-    camStatus = sawText ? "CAM_GARBAGE" : "CAM_NO_RESPONSE";
+    camStatus = sawText ? "CAM_TIMEOUT" : "CAM_NO_RESPONSE";
   }
   return false;
 }

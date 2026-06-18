@@ -4,7 +4,7 @@
  * Board: AI Thinker ESP32-CAM
  *
  * Protocol on PHOTO command:
- *   1. "CAM_OK: Photo saved /photo_N.jpg (X KB)\n" (x3 burst)
+ *   1. "CAM_OK: Photo saved /photo_N.jpg (X KB)\n"
  *   2. "IMG:<byte-count>\n"
  *   3. Raw JPEG bytes in 512-byte chunks
  *   4. "IMG_END\n"
@@ -32,6 +32,7 @@
 #define PCLK_GPIO_NUM     22
 #define FLASH_LED_PIN      4
 
+const int WARMUP_FRAMES = 2;
 int photoCount = 0;
 
 void setup() {
@@ -61,7 +62,7 @@ void setup() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   config.frame_size   = FRAMESIZE_VGA;
-  config.jpeg_quality = 10;
+  config.jpeg_quality = 12;
   config.fb_count     = 1;
 
   if (psramFound()) {
@@ -97,45 +98,35 @@ void takePhoto() {
   digitalWrite(FLASH_LED_PIN, HIGH);
   delay(100);
 
-  // Discard first frame (may be stale or poorly exposed)
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (fb) esp_camera_fb_return(fb);
-
-  // Take 3 photos in burst, save all to SD, send last one
-  camera_fb_t *sendFb = NULL;
-  for (int shot = 0; shot < 3; shot++) {
-    if (sendFb) esp_camera_fb_return(sendFb);
-    sendFb = NULL;
-
-    fb = esp_camera_fb_get();
-    if (!fb) {
-      Serial.println("CAM_ERROR: Capture " + String(shot + 1) + " failed");
-      continue;
-    }
-
-    photoCount++;
-    String filename = "/photo_" + String(photoCount) + ".jpg";
-    File file = SD_MMC.open(filename, FILE_WRITE);
-    if (file) {
-      size_t written = file.write(fb->buf, fb->len);
-      file.close();
-      if (written != fb->len) Serial.println("CAM_ERROR: SD write incomplete");
-    }
-
-    Serial.println("CAM_OK: Photo saved " + filename + " (" + String(fb->len / 1024) + " KB)");
-    sendFb = fb;
-
-    if (shot < 2) delay(300);
+  // Warm-up: discard frames to flush stale data and let AE/AWB settle
+  for (int i = 0; i < WARMUP_FRAMES; i++) {
+    camera_fb_t *wb = esp_camera_fb_get();
+    if (wb) esp_camera_fb_return(wb);
+    delay(80);
   }
 
-  digitalWrite(FLASH_LED_PIN, LOW);
-
+  // Capture single keeper frame
+  camera_fb_t *sendFb = esp_camera_fb_get();
   if (!sendFb) {
-    Serial.println("CAM_ERROR: All captures failed");
+    Serial.println("CAM_ERROR: Capture failed");
+    digitalWrite(FLASH_LED_PIN, LOW);
     return;
   }
 
-  // Send last photo over UART
+  photoCount++;
+  String filename = "/photo_" + String(photoCount) + ".jpg";
+  File file = SD_MMC.open(filename, FILE_WRITE);
+  if (file) {
+    size_t written = file.write(sendFb->buf, sendFb->len);
+    file.close();
+    if (written != sendFb->len) Serial.println("CAM_ERROR: SD write incomplete");
+  }
+
+  Serial.println("CAM_OK: Photo saved " + filename + " (" + String(sendFb->len / 1024) + " KB)");
+
+  digitalWrite(FLASH_LED_PIN, LOW);
+
+  // Send photo over UART
   Serial.println("IMG:" + String(sendFb->len));
   delay(50);
 
@@ -153,4 +144,8 @@ void takePhoto() {
   Serial.println("IMG_END");
 
   esp_camera_fb_return(sendFb);
+
+  // Defense-in-depth: discard any duplicate PHOTO command that arrived
+  // during capture/streaming so it cannot spawn a phantom burst.
+  while (Serial.available()) Serial.read();
 }
