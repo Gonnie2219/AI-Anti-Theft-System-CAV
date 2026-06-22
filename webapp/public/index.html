@@ -1226,7 +1226,10 @@ async function sendCommand(cmd, btn) {
   else if (cmd === 'IMMOBILIZE' || cmd === 'RESTORE')
     applyObservation({type:'command', dim:'ignition', cmd:cmd});
 
-  pendingAction = { cmd: cmd, btn: btn, originalText: originalText, timer: null };
+  var originalOnclick = cmd === 'IMMOBILIZE' ? confirmImmobilize
+    : cmd === 'RESTORE' ? confirmRestore
+    : function() { sendCommand(cmd, btn); };
+  pendingAction = { cmd: cmd, btn: btn, originalText: originalText, originalOnclick: originalOnclick, timer: null };
 
   // MQTT-first, POST-fallback. Exactly one path per click — never both.
   var sent = false;
@@ -1280,6 +1283,7 @@ function confirmAction() {
   p.btn.classList.remove('pending');
   p.btn.disabled = false;
   p.btn.innerHTML = p.originalText;
+  p.btn.onclick = p.originalOnclick;
   updateImmobilizeButton();
   // Confirm flash after renderPills sets className
   var pillId = (p.cmd === 'IMMOBILIZE' || p.cmd === 'RESTORE') ? 'ignition-pill' : 'status-pill';
@@ -1302,8 +1306,8 @@ function failAction(reason) {
   p.btn.onclick = function() {
     p.btn.classList.remove('failed');
     p.btn.innerHTML = p.originalText;
-    p.btn.onclick = function() { sendCommand(p.cmd, p.btn); };
-    sendCommand(p.cmd, p.btn);
+    p.btn.onclick = p.originalOnclick;
+    p.originalOnclick();
   };
   updateImmobilizeButton();
 }
