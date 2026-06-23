@@ -78,6 +78,7 @@ uint8_t*      imgBuffer     = nullptr;
 size_t        imgSize       = 0;
 bool          networkReady  = false;
 bool          systemArmed   = false;
+bool          gpsOn         = false;
 String        gpsLat, gpsLon, gpsMapsLink;
 unsigned long lastHeartbeat = 0;
 unsigned long lastGPS       = 0;
@@ -858,6 +859,7 @@ void pollWorkerCommands() {
 //  GPS
 // ─────────────────────────────────────────────────────────────
 void updateGPS() {
+  if (!gpsOn) return;  // GPS engine off; keep last-known lat/lon
   String r = sendAT("AT+CGPSINFO", "OK", 2000);
   SerialMon.println("[GPS] raw: " + r);
   int idx = r.indexOf("+CGPSINFO:");
@@ -1151,7 +1153,14 @@ void handleAlert(String reason) {
   //    Serial2 RX buffer doesn't overflow during multi-second AT operations.
   bool hasImage = receiveImage();
 
-  // 2) Update GPS
+  // 2) Ensure GPS is on — alarm implies system is armed.
+  //    Placed AFTER receiveImage() so the modem AT command
+  //    can't stall the UART drain during photo transfer.
+  if (!gpsOn) {
+    String r = sendAT("AT+CGPS=1", "OK", 2000);
+    gpsOn = (r.indexOf("OK") >= 0);
+    if (gpsOn) SerialMon.println("[GPS] ON (alert)");
+  }
   updateGPS();
 
 #if USE_NATIVE_SMS
@@ -1214,6 +1223,20 @@ void handleStatus(String status) {
   systemArmed = (status == "ARMED");
   lastActivityMs = millis();
   SerialMon.println("[STATUS] " + status);
+
+  // GPS power: on when armed, off when disarmed.
+  // IMMOBILIZED / IGNITION_OK intentionally ignored so GPS
+  // stays wherever it was (on if armed → immobilized).
+  if (status == "ARMED" && !gpsOn) {
+    String r = sendAT("AT+CGPS=1", "OK", 2000);
+    gpsOn = (r.indexOf("OK") >= 0);
+    SerialMon.println(gpsOn ? "[GPS] ON (armed)" : "[GPS] ON failed");
+  } else if (status == "DISARMED" && gpsOn) {
+    sendAT("AT+CGPS=0", "OK", 2000);
+    gpsOn = false;
+    gpsSpeedMph = -1.0;  // speed is meaningless with GPS off
+    SerialMon.println("[GPS] OFF (disarmed)");
+  }
 
   String body = "System " + status;
   if (gpsLat.length() > 0) body += "\nLocation: " + gpsLat + "," + gpsLon;
@@ -1373,11 +1396,8 @@ void setup() {
   connectMQTT();
   lastMqttReconnectMs = millis();
 
-  // GPS on
-  String gpsResp = sendAT("AT+CGPS=1", "OK", 2000);
-  if (gpsResp.indexOf("OK") >= 0) SerialMon.println("[GPS] AT+CGPS=1 OK - GPS started");
-  else if (gpsResp.indexOf("ERROR") >= 0) SerialMon.println("[GPS] AT+CGPS=1 FAILED: " + gpsResp);
-  else SerialMon.println("[GPS] AT+CGPS=1 unexpected: " + gpsResp);
+  // GPS starts OFF; enabled on STATUS:ARMED from Main
+  SerialMon.println("[GPS] off at boot (disarmed)");
 
 #if USE_NATIVE_SMS
   // SMS configuration (native AT+CMGS path)
@@ -1481,11 +1501,17 @@ void loop() {
       String payload = cmd.substring(7);
       int aIdx = payload.indexOf(",A:");
       int gIdx = payload.indexOf(",G:");
+      String prevMotion = motionState;
       if (aIdx >= 0) motionState = payload.substring(0, aIdx);
       if (aIdx >= 0 && gIdx > aIdx) accelDelta = payload.substring(aIdx + 3, gIdx).toFloat();
       if (gIdx >= 0) gyroMag = payload.substring(gIdx + 3).toFloat();
       lastMotionUpdateMs = millis();
       SerialMon.println("[MOTION] " + motionState + " A:" + String(accelDelta, 2) + " G:" + String(gyroMag, 2));
+      // Immediate status push on state transition (skip initial UNKNOWN)
+      if (motionState != prevMotion && prevMotion != "UNKNOWN") {
+        sendStatusUpdate();
+        lastStatusPushMs = millis();
+      }
     }
     else if (cmd.startsWith("IMMOBILIZE_REJECTED:")) {
       SerialMon.println("[SAFETY] " + cmd);
