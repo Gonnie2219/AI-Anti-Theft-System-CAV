@@ -74,6 +74,9 @@ bool lastReed = LOW;
 unsigned long lastAlarmTime = 0;
 #define DEBOUNCE_MS 5000
 
+// Status LED blink — 50ms flash every 2s
+unsigned long lastLedBlinkMs = 0;
+
 // Image buffer (allocated once in setup; only written/read in alarm task on Core 0)
 #define IMG_BUF_SIZE 65536
 uint8_t* imgBuffer = NULL;
@@ -111,6 +114,7 @@ int ringSampled = 0;
 // Motion hysteresis timing
 unsigned long motionConditionStart = 0;
 bool motionConditionAbove = false;
+volatile bool motionStateChanged = false;
 
 #define ACCEL_TH 0.5f    // m/s^2
 #define GYRO_TH  0.2f    // rad/s
@@ -282,12 +286,17 @@ void readMotion() {
 
   unsigned long elapsed = now - motionConditionStart;
 
+  MotionState prev = motionState;
+
   if (above && elapsed >= 500) {
     motionState = MOTION_MOVING;
   } else if (!above && elapsed >= 2000) {
     motionState = MOTION_STATIONARY;
   }
   // Otherwise hold current state
+
+  if (motionState != prev && prev != MOTION_UNKNOWN)
+    motionStateChanged = true;
 }
 
 // ── Main Loop (Core 1) — Always responsive ──────────────────
@@ -301,6 +310,7 @@ void loop() {
       preferences.putBool("armed", true);
       digitalWrite(LED_GREEN, HIGH);
       digitalWrite(LED_RED, LOW);
+      lastLedBlinkMs = millis();
       Serial.println("System armed");
       if (xSemaphoreTake(lilygoMutex, pdMS_TO_TICKS(100))) {
         if (!alarmInProgress) SerialLilyGO.println("STATUS:ARMED");
@@ -311,6 +321,7 @@ void loop() {
       preferences.putBool("armed", false);
       digitalWrite(LED_GREEN, LOW);
       digitalWrite(LED_RED, HIGH);
+      lastLedBlinkMs = millis();
       Serial.println("System disarmed");
       if (xSemaphoreTake(lilygoMutex, pdMS_TO_TICKS(100))) {
         if (!alarmInProgress) SerialLilyGO.println("STATUS:DISARMED");
@@ -349,7 +360,8 @@ void loop() {
   if (!alarmInProgress) {
     unsigned long motionInterval = armed ? 5000 : 30000;
     unsigned long now = millis();
-    if (now - lastMotionPushMs >= motionInterval) {
+    if (motionStateChanged || (now - lastMotionPushMs >= motionInterval)) {
+      motionStateChanged = false;
       lastMotionPushMs = now;
       if (xSemaphoreTake(lilygoMutex, pdMS_TO_TICKS(100))) {
         String motStr = (motionState == MOTION_STATIONARY) ? "STATIONARY" :
@@ -358,6 +370,20 @@ void loop() {
                              ",G:" + String(lastGyroMag, 2));
         xSemaphoreGive(lilygoMutex);
       }
+    }
+  }
+
+  // Non-blocking status LED blink — 50ms flash every 2s.
+  // Skipped during alarm (soundLocalAlarm owns LEDs on Core 0).
+  if (!alarmInProgress) {
+    unsigned long blinkElapsed = millis() - lastLedBlinkMs;
+    if (blinkElapsed >= 2000) {
+      lastLedBlinkMs = millis();
+      digitalWrite(LED_GREEN, armed ? HIGH : LOW);
+      digitalWrite(LED_RED,   armed ? LOW  : HIGH);
+    } else if (blinkElapsed >= 50) {
+      digitalWrite(LED_GREEN, LOW);
+      digitalWrite(LED_RED,   LOW);
     }
   }
 
@@ -621,6 +647,7 @@ void handleSMSCommand(String cmd) {
       preferences.putBool("armed", true);
       digitalWrite(LED_GREEN, HIGH);
       digitalWrite(LED_RED, LOW);
+      lastLedBlinkMs = millis();
       Serial.println("Armed via SMS");
       SerialLilyGO.println("SMS_REPLY:System armed");
       SerialLilyGO.println("STATUS:ARMED");
@@ -633,6 +660,7 @@ void handleSMSCommand(String cmd) {
       preferences.putBool("armed", false);
       digitalWrite(LED_GREEN, LOW);
       digitalWrite(LED_RED, HIGH);
+      lastLedBlinkMs = millis();
       Serial.println("Disarmed via SMS");
       SerialLilyGO.println("SMS_REPLY:System disarmed");
       SerialLilyGO.println("STATUS:DISARMED");
