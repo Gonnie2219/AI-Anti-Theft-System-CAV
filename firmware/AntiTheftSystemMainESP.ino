@@ -89,6 +89,7 @@ String camStatus = "";
 
 // Alarm task control
 volatile bool alarmInProgress = false;
+volatile bool statusPending = false;  // deferred STATUS send after alarm completes
 
 HardwareSerial SerialLilyGO(1);
 SemaphoreHandle_t lilygoMutex;
@@ -240,6 +241,16 @@ void setup() {
   if (!camReady)    Serial.println("  CAM did not report ready");
   if (!lilygoReady) Serial.println("  LILYGO did not report ready");
 
+  // Sync persisted state to LILYGO so its GPS gating, poll cadence, and
+  // systemArmed flag are correct from boot — Main only sends STATUS on
+  // state CHANGES in the loop, so without this a boot-while-armed LILYGO
+  // would not know the system is armed until the next arm/disarm event.
+  if (lilygoReady) {
+    SerialLilyGO.println(armed ? "STATUS:ARMED" : "STATUS:DISARMED");
+    if (immobilized) SerialLilyGO.println("STATUS:IMMOBILIZED");
+    Serial.println("  Synced state to LILYGO");
+  }
+
   Serial.println(armed ? "System ready - ARMED\n" : "System ready - DISARMED\n");
 }
 
@@ -314,6 +325,7 @@ void loop() {
       Serial.println("System armed");
       if (xSemaphoreTake(lilygoMutex, pdMS_TO_TICKS(100))) {
         if (!alarmInProgress) SerialLilyGO.println("STATUS:ARMED");
+        else statusPending = true;
         xSemaphoreGive(lilygoMutex);
       }
     } else if (code == CODE_DISARM && armed) {
@@ -325,6 +337,7 @@ void loop() {
       Serial.println("System disarmed");
       if (xSemaphoreTake(lilygoMutex, pdMS_TO_TICKS(100))) {
         if (!alarmInProgress) SerialLilyGO.println("STATUS:DISARMED");
+        else statusPending = true;
         xSemaphoreGive(lilygoMutex);
       }
     }
@@ -566,6 +579,17 @@ void alarmTask(void* param) {
 
   Serial.println("Alarm handled.\n");
   alarmInProgress = false;
+
+  // Flush any STATUS that was deferred while alarm owned the UART
+  if (statusPending) {
+    statusPending = false;
+    if (xSemaphoreTake(lilygoMutex, pdMS_TO_TICKS(200))) {
+      SerialLilyGO.println(armed ? "STATUS:ARMED" : "STATUS:DISARMED");
+      if (immobilized) SerialLilyGO.println("STATUS:IMMOBILIZED");
+      Serial.println("  Flushed deferred STATUS to LILYGO");
+      xSemaphoreGive(lilygoMutex);
+    }
+  }
 
   // Delete this task when done
   vTaskDelete(NULL);

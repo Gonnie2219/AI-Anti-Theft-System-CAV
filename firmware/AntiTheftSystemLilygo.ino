@@ -41,7 +41,7 @@ const char    OWNER_PHONE[]    = "+16093589220";
 
 #define USE_NATIVE_SMS      0          // 1 = SpeedTalk AT+CMGS, 0 = Twilio via ntfy
 
-#define IMG_BUF_SIZE        51200      // 50 KB photo buffer
+#define IMG_BUF_SIZE        65536      // 64 KB photo buffer
 #define HEARTBEAT_MS      300000UL     // 5 minutes
 #define GPS_UPDATE_MS     300000UL     // 5 minutes
 #define WORKER_CMD_POLL_URL "https://antitheft-whatsapp-bridge.gonnie2219.workers.dev/commands/poll"
