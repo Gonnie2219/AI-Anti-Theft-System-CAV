@@ -598,7 +598,8 @@ async function pollWorkerStatus() {
       type: 'kv',
       statusValue: data.armed ? 'ARMED' : 'DISARMED',
       ignitionValue: data.immobilized ? 'IMMOBILIZED' : 'OK',
-      ts: data.ts
+      statusTs: data.statusTs || data.ts || 0,
+      ignitionTs: data.ignitionTs || data.ts || 0
     });
   } catch(e) {}
 }
@@ -796,20 +797,22 @@ function applyObservation(obs) {
   } else if (obs.type === 'kv') {
     // R2: KV poll — per dimension, only if value changed AND fresher
     var changed = false;
-    if (obs.statusValue !== pillState.status && obs.ts > pillState.statusTs) {
+    var sTs = obs.statusTs || obs.ts || 0;
+    var iTs = obs.ignitionTs || obs.ts || 0;
+    if (obs.statusValue !== pillState.status && sTs > pillState.statusTs) {
       pillState.status = obs.statusValue;
-      pillState.statusTs = obs.ts;
+      pillState.statusTs = sTs;
       changed = true;
-      if (pillState.pendingStatus && obs.ts > pillState.pendingStatus.tsAtSend) {
+      if (pillState.pendingStatus && sTs > pillState.pendingStatus.tsAtSend) {
         pillState.pendingStatus = null;
         if (pendingAction && (pendingAction.cmd === 'ARM' || pendingAction.cmd === 'DISARM')) confirmAction();
       }
     }
-    if (obs.ignitionValue !== pillState.ignition && obs.ts > pillState.ignitionTs) {
+    if (obs.ignitionValue !== pillState.ignition && iTs > pillState.ignitionTs) {
       pillState.ignition = obs.ignitionValue;
-      pillState.ignitionTs = obs.ts;
+      pillState.ignitionTs = iTs;
       changed = true;
-      if (pillState.pendingIgnition && obs.ts > pillState.pendingIgnition.tsAtSend) {
+      if (pillState.pendingIgnition && iTs > pillState.pendingIgnition.tsAtSend) {
         pillState.pendingIgnition = null;
         if (pendingAction && (pendingAction.cmd === 'IMMOBILIZE' || pendingAction.cmd === 'RESTORE')) confirmAction();
       }
@@ -1148,6 +1151,7 @@ function dismissSafetyLockout() {
 }
 
 async function analyzePhoto(imageUrl, feedItem) {
+  if (!CMD_SECRET) return; // no login session — skip AI analysis silently
   var badges = feedItem.querySelector('.feed-badges');
   if (badges) {
     badges.innerHTML += '<span class="feed-badge ai-loading" data-ai="true">AI analyzing...</span>';
@@ -1155,7 +1159,7 @@ async function analyzePhoto(imageUrl, feedItem) {
   try {
     const resp = await fetch('/api/analyze', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-CMD-Secret': CMD_SECRET },
       body: JSON.stringify({ imageUrl: imageUrl })
     });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);

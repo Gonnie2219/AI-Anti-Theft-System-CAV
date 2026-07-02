@@ -35,3 +35,6 @@ desktop.ini
 
 # Firmware secrets (contains CMD_SECRET)
 firmware/secrets.h
+
+# Local wrangler state, never committed
+.wrangler/

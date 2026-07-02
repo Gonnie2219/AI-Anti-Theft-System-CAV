@@ -425,12 +425,15 @@ async function _handleCron(env) {
 
   const replies = fresh.filter(
     (m) =>
-      typeof m.message === "string" &&
-      (m.message.startsWith("SMS_REPLY:") ||
-        m.message.startsWith("Command Reply"))
+      typeof m.message === "string" && m.message.startsWith("SMS_REPLY:")
   );
 
-  console.log(`Found ${alerts.length} alert(s), ${photos.length} photo(s), ${replies.length} reply(s)`);
+  const lockouts = fresh.filter(
+    (m) =>
+      typeof m.message === "string" && m.message.startsWith("Immobilize refused")
+  );
+
+  console.log(`Found ${alerts.length} alert(s), ${photos.length} photo(s), ${replies.length} reply(s), ${lockouts.length} lockout(s)`);
 
   // --- Process alerts (WhatsApp + SMS) ---
   for (const alert of alerts) {
@@ -459,7 +462,7 @@ async function _handleCron(env) {
     // Run AI analysis on the photo if available
     let aiVerdict = null;
     if (mediaUrl && env.ANALYZE_URL) {
-      aiVerdict = await analyzePhoto(env.ANALYZE_URL, mediaUrl);
+      aiVerdict = await analyzePhoto(env.ANALYZE_URL, mediaUrl, env.CMD_SECRET);
     }
 
     // WhatsApp
@@ -561,6 +564,24 @@ async function _handleCron(env) {
     console.log(`Reply ${reply.id}: sms=${dedup.sms}`);
   }
 
+  // --- Forward safety-lockout notifications (WhatsApp + Web Push) ---
+  for (const msg of lockouts) {
+    const dedupKey = `msg:${msg.id}`;
+    if (await env.ANTITHEFT_STATE.get(dedupKey)) continue;
+
+    const body = msg.message || "";
+    await sendWhatsApp(env, `⚠️ Safety Lockout\n${body}`, null);
+    try {
+      await sendWebPushToAll(env, "⚠️ Safety Lockout", body, DASHBOARD_URL);
+    } catch (err) {
+      console.error(`[lockout] push failed: ${err.message}`);
+    }
+    await env.ANTITHEFT_STATE.put(dedupKey, JSON.stringify({ whatsapp: true, sms: true, push: true }), {
+      expirationTtl: 86400,
+    });
+    console.log(`Forwarded safety lockout ${msg.id}`);
+  }
+
   // --- Extract system status from "System X" messages ---
   // LILYGO posts "System ARMED", "System DISARMED", "System IMMOBILIZED",
   // "System IGNITION_OK" to ntfy when the Main ESP reports state changes.
@@ -570,12 +591,11 @@ async function _handleCron(env) {
     if (!body.startsWith("System ")) continue;
     const keyword = body.split("\n")[0].substring(7).trim().toUpperCase();
     const stored = parseSystemStatus(await env.ANTITHEFT_STATE.get("system_status"));
-    if (keyword === "ARMED")       stored.armed = true;
-    else if (keyword === "DISARMED") stored.armed = false;
-    else if (keyword === "IMMOBILIZED") stored.immobilized = true;
-    else if (keyword === "IGNITION_OK") stored.immobilized = false;
+    if (keyword === "ARMED")            { stored.armed = true;  stored.statusTs = msg.time * 1000; }
+    else if (keyword === "DISARMED")    { stored.armed = false; stored.statusTs = msg.time * 1000; }
+    else if (keyword === "IMMOBILIZED") { stored.immobilized = true;  stored.ignitionTs = msg.time * 1000; }
+    else if (keyword === "IGNITION_OK") { stored.immobilized = false; stored.ignitionTs = msg.time * 1000; }
     else continue;
-    stored.ts = msg.time * 1000;
     await env.ANTITHEFT_STATE.put("system_status", JSON.stringify(stored));
     console.log(`Status updated: ${keyword}`);
   }
@@ -659,11 +679,13 @@ async function sendWhatsApp(env, message, mediaUrl) {
   return true;
 }
 
-async function analyzePhoto(analyzeUrl, imageUrl) {
+async function analyzePhoto(analyzeUrl, imageUrl, cmdSecret) {
   try {
+    const headers = { "Content-Type": "application/json" };
+    if (cmdSecret) headers["X-CMD-Secret"] = cmdSecret;
     const resp = await fetch(analyzeUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ imageUrl }),
     });
     if (!resp.ok) {
@@ -860,8 +882,14 @@ function corsJson(data, status = 200) {
 }
 
 function parseSystemStatus(raw) {
-  if (!raw) return { armed: false, immobilized: false, ts: 0 };
-  try { return JSON.parse(raw); } catch { return { armed: false, immobilized: false, ts: 0 }; }
+  const def = { armed: false, immobilized: false, statusTs: 0, ignitionTs: 0 };
+  if (!raw) return def;
+  try {
+    const obj = JSON.parse(raw);
+    // Migrate legacy single-ts format
+    if (obj.ts && !obj.statusTs) { obj.statusTs = obj.ts; obj.ignitionTs = obj.ts; delete obj.ts; }
+    return { ...def, ...obj };
+  } catch { return def; }
 }
 
 async function handleStatusPoll(env) {

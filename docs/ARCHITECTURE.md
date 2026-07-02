@@ -13,14 +13,14 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
   - UART0 (Serial) = USB debug
   - UART2 (Serial2, TX=17 RX=16) = ESP32-CAM
   - UART1 (SerialLilyGO, TX=27 RX=26) = LILYGO
-- **Concurrency:** `lilygoMutex` (FreeRTOS semaphore) protects all SerialLilyGO access across cores. `alarmInProgress` flag prevents sensor re-triggering during alarm processing.
-- **Image buffer:** 50KB heap allocation, filled from CAM then forwarded to LILYGO in 512-byte chunks
+- **Concurrency:** `lilygoMutex` (FreeRTOS semaphore) protects all SerialLilyGO access across cores. `alarmInProgress` flag prevents sensor re-triggering during alarm processing. `statusPending` flag defers STATUS sends that collide with the alarm task's UART usage — flushed after alarm completes.
+- **Image buffer:** 64KB heap allocation, filled from CAM then forwarded to LILYGO in 512-byte chunks
 - **Immobilizer:** AEDIKO relay on GPIO23, wired through the **NC** contact (`RELAY_WIRING_NC 1`) — coil energized only while immobilized (GPIO23 HIGH = immobilized, LOW = ignition OK). Saves ~70 mA continuous and fails safe to ignition-OK on power loss. State persists in NVS and is re-asserted at boot.
 
 ### ESP32-CAM (`ESP32CAM.txt`)
 - **Role:** Photo capture + SD card storage
 - **Protocol on PHOTO command:**
-  1. Discards stale frame, takes 3-photo burst (saves all to SD)
+  1. Takes 2 warm-up frames (AE/AWB settle), then 1 keeper frame (saved to SD)
   2. Sends `IMG:<size>\n` header
   3. Sends raw JPEG bytes in 512-byte chunks
   4. Sends `IMG_END\n`
@@ -46,7 +46,7 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
   - GPS response: Title: "GPS Location", Priority: low, Tags: round_pushpin
   - Heartbeat: Every 5 minutes; includes battery level from AT+CBC as "Battery: NN% (V.VVV)"
   - SMS reply: Posted to ntfy with Title "Command Reply"; Worker forwards as SMS (native outbound SMS disabled)
-- **GPS:** Polled every 30s via AT+CGPSINFO, included in notifications
+- **GPS:** Gated on armed state — `AT+CGPS=1` on STATUS:ARMED, `AT+CGPS=0` on STATUS:DISARMED. IMMOBILIZED/IGNITION_OK don't change GPS (stays on for theft tracking). `handleAlert()` turns GPS on if off (boot-while-armed edge case). Polled every 30s via AT+CGPSINFO when active; included in notifications.
 
 ## Inter-Board Protocol (UART, 115200 baud)
 
@@ -108,7 +108,7 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
 - **Input:** POST with JSON body `{ imageUrl: "..." }`
 - **Process:** Fetches the image, sends it to Claude with a security-focused prompt asking for threat classification
 - **Output:** JSON `{ threatLevel: "HIGH"|"MEDIUM"|"LOW", verdict: "..." }`
-- **Auth:** Uses `ANTHROPIC_API_KEY` environment variable (set in Vercel project settings)
+- **Auth:** Requires `X-CMD-Secret` header matching the `CMD_SECRET` environment variable (shared secret with Worker). Also requires `ANTHROPIC_API_KEY` environment variable (set in Vercel project settings).
 
 ### PWA + Web Push Notifications
 - **Installable PWA:** `manifest.json` (name "Anti-Theft Dashboard", `display: standalone`, dark theme) + `icon-192/512.png` + `apple-touch-icon.png`. On iPhone: Safari Share → Add to Home Screen (iOS 16.4+ required for push).
@@ -122,7 +122,7 @@ Three-board ESP32 system that detects intrusion (vibration/door sensor), capture
 | Parameter | Value | Location |
 |-----------|-------|----------|
 | Sensor debounce | 5000ms | ESP32Main |
-| Image buffer | 50KB | ESP32Main + LILYGO |
+| Image buffer | 64KB | ESP32Main + LILYGO |
 | Alarm task stack | 16KB | ESP32Main |
 | CAM serial RX buffer | 2048 bytes | ESP32Main |
 | CAM photo receive | 15 s timeout, 1 retry after 2 s flush | ESP32Main |

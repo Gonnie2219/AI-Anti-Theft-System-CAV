@@ -5,13 +5,21 @@ const client = new Anthropic();
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
 
+  const secret = req.headers['x-cmd-secret'] || '';
+  if (!process.env.CMD_SECRET || secret !== process.env.CMD_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
   const { imageUrl } = req.body || {};
   if (!imageUrl) return res.status(400).json({ error: 'imageUrl required' });
 
-  // SSRF protection: only allow ntfy.sh image URLs
+  // SSRF protection: only allow ntfy.sh attachment download URLs (/file/*)
   try {
     const parsed = new URL(imageUrl);
     if (!parsed.hostname.endsWith('ntfy.sh')) {
+      return res.status(400).json({ error: 'Only ntfy.sh image URLs are allowed' });
+    }
+    if (!parsed.pathname.startsWith('/file/')) {
       return res.status(400).json({ error: 'Only ntfy.sh image URLs are allowed' });
     }
     if (!['http:', 'https:'].includes(parsed.protocol)) {
