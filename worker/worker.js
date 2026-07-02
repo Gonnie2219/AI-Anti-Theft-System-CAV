@@ -1,37 +1,35 @@
 /**
  * Cloudflare Worker: Anti-Theft Alert Bridge + Command Queue
  *
- * Two delivery paths for alerts:
- *   FAST: LILYGO POSTs directly to /ingest → immediate WhatsApp delivery
- *   SAFE: Cron polls ntfy every 60s → safety-net WhatsApp + photo matching
+ * Alert delivery is website-only (dashboard SSE + ntfy + Web Push).
+ * Retired Twilio WhatsApp/SMS delivery paths were removed 2026-07.
+ *   FAST: LILYGO POSTs directly to /ingest → immediate Web Push fan-out
+ *   SAFE: Cron polls ntfy every 60s → safety-net Web Push
  * Both paths share a body-content-hash dedup key in KV.
  *
- * Command path (KV-only):
+ * Command path (KV fallback lane; primary is the browser's direct MQTT publish):
  *   Dashboard → browser POSTs to /commands/dispatch → KV cmd_queue → /commands/poll
- *   SMS       → Twilio → /sms/inbound → KV cmd_queue → /commands/poll
  *   /commands/poll reads KV with a numeric timestamp cursor, authenticated by DEVICE_POLL_TOKEN
  *
  * Status path (vehicle → dashboard):
  *   LILYGO posts "System X" to ntfy → cron extracts → KV system_status → GET /status
  *
  * Required secrets (set via `wrangler secret put`):
- *   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN,
- *   TWILIO_FROM, TWILIO_TO          — WhatsApp (whatsapp:+… prefix)
- *   TWILIO_SMS_FROM, TWILIO_SMS_TO  — SMS (plain +1… numbers)
- *   NTFY_TOPIC, ANALYZE_URL (Vercel /api/analyze endpoint)
+ *   NTFY_TOPIC
  *   CMD_SECRET — shared secret for authenticating dashboard and LILYGO /ingest
  *   DEVICE_POLL_TOKEN — bearer token for LILYGO /commands/poll authentication
  *   VAPID_PRIVATE_KEY — P-256 private scalar (base64url) for Web Push VAPID
  *
- * Web Push path (user-facing channel, in ADDITION to WhatsApp):
+ * Web Push path (user-facing channel):
  *   Dashboard PWA → POST /push/subscribe → KV push_sub:<sha256(endpoint)>
  *   Alerts (ingest + cron) → sendWebPushToAll → push services (RFC 8291/8292)
  *
  * KV namespace binding: ANTITHEFT_STATE
+ * The Worker keeps its historical name "antitheft-whatsapp-bridge" — the URL
+ * is hardcoded in the LILYGO firmware; do not rename.
  */
 
 const VALID_COMMANDS = ["ARM", "DISARM", "STATUS", "PHOTO", "GPS", "HELP", "IMMOBILIZE", "RESTORE"];
-const OWNER_LAST10 = "6093589220";
 
 // ── Web Push (RFC 8291 aes128gcm + RFC 8292 VAPID) ───────────
 // Private key (P-256 scalar, base64url) lives in the VAPID_PRIVATE_KEY secret.
@@ -41,17 +39,16 @@ const DASHBOARD_URL = "https://webapp-seven-livid-86.vercel.app/";
 
 // Verify Bearer token or X-CMD-Secret header against the CMD_SECRET env var.
 // Used to authenticate dashboard /commands/dispatch and LILYGO /ingest.
+// Rejects everything when CMD_SECRET is unset or implausibly short — an
+// empty or misconfigured secret must never match an empty header.
 function checkCmdSecret(request, env) {
+  if (!env.CMD_SECRET || env.CMD_SECRET.length < 16) return false;
   const authHeader = request.headers.get("Authorization") || "";
   if (authHeader === `Bearer ${env.CMD_SECRET}`) return true;
   const secretHeader = request.headers.get("X-CMD-Secret") || "";
   if (secretHeader === env.CMD_SECRET) return true;
   return false;
 }
-// Set to true after Twilio 10DLC Sole Proprietor campaign is approved.
-// Until then, every send attempt fails with Twilio error 30034 (carrier
-// violation) AND may incur carrier filtering fees on the sending number.
-const USE_TWILIO_SMS = false;
 
 export default {
   async scheduled(event, env, ctx) {
@@ -64,11 +61,6 @@ export default {
     // Fast-path alert ingest from LILYGO (bypasses ntfy→cron 60s delay)
     if (request.method === "POST" && url.pathname === "/ingest") {
       return handleIngest(request, env);
-    }
-
-    // Inbound SMS webhook from Twilio
-    if (request.method === "POST" && url.pathname === "/sms/inbound") {
-      return handleInboundSMS(request, env);
     }
 
     // Command queue: LILYGO polls for pending commands
@@ -118,14 +110,15 @@ export default {
   },
 };
 
-// Parse dedup value: handles legacy "1" and new JSON format
+// Parse dedup value: handles legacy "1" and JSON formats.
+// Only the `push` field is read since WhatsApp/SMS delivery was retired.
 function parseDedup(raw) {
-  if (!raw) return { whatsapp: false, sms: false, push: false };
-  if (raw === "1") return { whatsapp: true, sms: true, push: true }; // legacy: fully delivered
+  if (!raw) return { push: false };
+  if (raw === "1") return { push: true }; // legacy: fully delivered
   try {
     return JSON.parse(raw);
   } catch {
-    return { whatsapp: false, sms: false, push: false };
+    return { push: false };
   }
 }
 
@@ -353,26 +346,7 @@ async function handleIngest(request, env) {
     return Response.json({ status: "dedup" });
   }
 
-  // Format and send WhatsApp immediately (text only, no photo)
-  const alert = { message: body };
-  const message = formatWhatsAppMessage(alert, null);
-  let waOk = false;
-  if (await sendWhatsApp(env, message, null)) {
-    waOk = true;
-    console.log("[ingest] WhatsApp sent");
-  } else {
-    console.error("[ingest] WhatsApp failed");
-  }
-
-  // SMS — text-only alert (no photo available at ingest time)
-  let smsOk = !USE_TWILIO_SMS; // true when disabled → suppresses cron retry
-  if (USE_TWILIO_SMS) {
-    const smsBody = formatSMSMessage(alert, null);
-    smsOk = await sendSMS(env, smsBody);
-    console.log(smsOk ? "[ingest] SMS sent" : "[ingest] SMS failed");
-  }
-
-  // Web Push fan-out (mirrors the WhatsApp fast path)
+  // Web Push fan-out — the sole fast-path delivery channel
   let pushSent = 0;
   try {
     pushSent = await pushAlert(env, body);
@@ -381,15 +355,14 @@ async function handleIngest(request, env) {
     console.error(`[ingest] web push failed: ${err.message}`);
   }
 
-  // Write dedup key so cron doesn't re-send the text alert.
-  // Cron can still send a follow-up photo if one arrives.
+  // Write dedup key so cron doesn't re-push this alert.
   await env.ANTITHEFT_STATE.put(
     dedupKey,
-    JSON.stringify({ whatsapp: waOk, sms: smsOk, push: true, ingest: true }),
+    JSON.stringify({ push: true, ingest: true }),
     { expirationTtl: 86400 }
   );
 
-  return Response.json({ status: "ok", whatsapp: waOk, sms: smsOk, push: pushSent });
+  return Response.json({ status: "ok", push: pushSent });
 }
 
 async function handleCron(env) {
@@ -410,22 +383,11 @@ async function _handleCron(env) {
   const fresh = messages.filter((m) => m.time >= freshCutoff);
   if (fresh.length === 0) return;
 
-  // Separate into alerts, photos, and command replies
+  // Separate into alerts and safety lockouts. Photos and SMS_REPLY messages
+  // are consumed by the dashboard directly over ntfy SSE — the cron only
+  // needed them for the retired WhatsApp/SMS delivery.
   const alerts = fresh.filter(
     (m) => typeof m.message === "string" && m.message.startsWith("ALERT:")
-  );
-
-  const photos = fresh.filter(
-    (m) =>
-      m.attachment &&
-      m.attachment.url &&
-      m.attachment.name &&
-      /\.jpe?g$/i.test(m.attachment.name)
-  );
-
-  const replies = fresh.filter(
-    (m) =>
-      typeof m.message === "string" && m.message.startsWith("SMS_REPLY:")
   );
 
   const lockouts = fresh.filter(
@@ -433,88 +395,31 @@ async function _handleCron(env) {
       typeof m.message === "string" && m.message.startsWith("Immobilize refused")
   );
 
-  console.log(`Found ${alerts.length} alert(s), ${photos.length} photo(s), ${replies.length} reply(s), ${lockouts.length} lockout(s)`);
+  console.log(`Found ${alerts.length} alert(s), ${lockouts.length} lockout(s)`);
 
-  // --- Process alerts (WhatsApp + SMS) ---
+  // --- Process alerts (Web Push safety net; /ingest is the fast path) ---
   for (const alert of alerts) {
     const dedupKey = `msg:${alert.id}`;
     const dedup = parseDedup(await env.ANTITHEFT_STATE.get(dedupKey));
-    if (dedup.whatsapp && dedup.sms && dedup.push) {
-      console.log(`Skipping fully delivered: ${alert.id}`);
+    if (dedup.push) {
+      console.log(`Skipping delivered: ${alert.id}`);
       continue;
     }
 
-    // Check if /ingest already sent the text-only WhatsApp for this alert
+    // Skip the push when /ingest already handled this alert body
     const bKey = await bodyDedupKey(alert.message || "");
     const ingestDedup = parseDedup(await env.ANTITHEFT_STATE.get(bKey));
-    const ingestHandled = ingestDedup.whatsapp;
 
-    // Find matching photo within 30s after the alert
-    const matchedPhoto = photos.find(
-      (p) => p.time >= alert.time && p.time - alert.time <= 30
-    );
-
-    const mediaUrl =
-      matchedPhoto && matchedPhoto.attachment && matchedPhoto.attachment.url
-        ? matchedPhoto.attachment.url
-        : null;
-
-    // Run AI analysis on the photo if available
-    let aiVerdict = null;
-    if (mediaUrl && env.ANALYZE_URL) {
-      aiVerdict = await analyzePhoto(env.ANALYZE_URL, mediaUrl, env.CMD_SECRET);
-    }
-
-    // WhatsApp
-    if (!dedup.whatsapp) {
-      if (ingestHandled) {
-        // /ingest already sent text-only WhatsApp; send photo follow-up if available
-        dedup.whatsapp = true;
-        if (mediaUrl) {
-          const photoMsg = aiVerdict
-            ? `📷 Photo + AI: ${aiVerdict}`
-            : "📷 Alert photo";
-          await sendWhatsApp(env, photoMsg, mediaUrl);
-          console.log(`Photo follow-up for ingest-handled alert ${alert.id}`);
-        }
-      } else {
-        // Normal cron path: full WhatsApp with text + photo + AI
-        const message = formatWhatsAppMessage(alert, aiVerdict);
-        if (await sendWhatsApp(env, message, mediaUrl)) {
-          dedup.whatsapp = true;
-        } else {
-          console.error(`WhatsApp failed for ${alert.id}`);
-        }
+    if (ingestDedup.push) {
+      dedup.push = true;
+    } else {
+      try {
+        const sent = await pushAlert(env, alert.message || "");
+        console.log(`Web push for ${alert.id}: ${sent} subscription(s)`);
+      } catch (err) {
+        console.error(`Web push failed for ${alert.id}: ${err.message}`);
       }
-    }
-
-    // SMS
-    if (!dedup.sms) {
-      if (USE_TWILIO_SMS) {
-        const smsBody = formatSMSMessage(alert, mediaUrl);
-        if (await sendSMS(env, smsBody)) {
-          dedup.sms = true;
-        } else {
-          console.error(`SMS failed for ${alert.id}`);
-        }
-      } else {
-        dedup.sms = true; // mark delivered to avoid retry noise
-      }
-    }
-
-    // Web Push (skipped when /ingest already pushed this alert)
-    if (!dedup.push) {
-      if (ingestDedup.push) {
-        dedup.push = true;
-      } else {
-        try {
-          const sent = await pushAlert(env, alert.message || "");
-          console.log(`Web push for ${alert.id}: ${sent} subscription(s)`);
-        } catch (err) {
-          console.error(`Web push failed for ${alert.id}: ${err.message}`);
-        }
-        dedup.push = true; // best-effort: no retry loop on partial failures
-      }
+      dedup.push = true; // best-effort: no retry loop on partial failures
     }
 
     await env.ANTITHEFT_STATE.put(dedupKey, JSON.stringify(dedup), {
@@ -524,59 +429,21 @@ async function _handleCron(env) {
     await env.ANTITHEFT_STATE.put(bKey, JSON.stringify(dedup), {
       expirationTtl: 86400,
     });
-    if (matchedPhoto) {
-      await env.ANTITHEFT_STATE.put(
-        `msg:${matchedPhoto.id}`,
-        JSON.stringify({ whatsapp: true, sms: true }),
-        { expirationTtl: 86400 }
-      );
-      console.log(`Forwarded alert ${alert.id} with photo ${matchedPhoto.id}`);
-    } else {
-      console.log(`Forwarded alert ${alert.id} (wa:${dedup.whatsapp} sms:${dedup.sms} ingest:${ingestHandled})`);
-    }
+    console.log(`Forwarded alert ${alert.id} (push:${dedup.push})`);
   }
 
-  // --- Process command replies (SMS only) ---
-  for (const reply of replies) {
-    const dedupKey = `msg:${reply.id}`;
-    const dedup = parseDedup(await env.ANTITHEFT_STATE.get(dedupKey));
-    if (dedup.sms) {
-      console.log(`Skipping delivered reply: ${reply.id}`);
-      continue;
-    }
-
-    let body = reply.message || "(no response)";
-    if (body.startsWith("SMS_REPLY:")) body = body.substring(10).trim();
-    if (USE_TWILIO_SMS) {
-      if (await sendSMS(env, body)) {
-        dedup.sms = true;
-        dedup.whatsapp = true; // not applicable for replies
-      } else {
-        console.error(`SMS failed for reply ${reply.id}`);
-      }
-    } else {
-      dedup.sms = true;
-      dedup.whatsapp = true;
-    }
-    await env.ANTITHEFT_STATE.put(dedupKey, JSON.stringify(dedup), {
-      expirationTtl: 86400,
-    });
-    console.log(`Reply ${reply.id}: sms=${dedup.sms}`);
-  }
-
-  // --- Forward safety-lockout notifications (WhatsApp + Web Push) ---
+  // --- Forward safety-lockout notifications (Web Push) ---
   for (const msg of lockouts) {
     const dedupKey = `msg:${msg.id}`;
     if (await env.ANTITHEFT_STATE.get(dedupKey)) continue;
 
     const body = msg.message || "";
-    await sendWhatsApp(env, `⚠️ Safety Lockout\n${body}`, null);
     try {
       await sendWebPushToAll(env, "⚠️ Safety Lockout", body, DASHBOARD_URL);
     } catch (err) {
       console.error(`[lockout] push failed: ${err.message}`);
     }
-    await env.ANTITHEFT_STATE.put(dedupKey, JSON.stringify({ whatsapp: true, sms: true, push: true }), {
+    await env.ANTITHEFT_STATE.put(dedupKey, JSON.stringify({ push: true }), {
       expirationTtl: 86400,
     });
     console.log(`Forwarded safety lockout ${msg.id}`);
@@ -598,19 +465,6 @@ async function _handleCron(env) {
     else continue;
     await env.ANTITHEFT_STATE.put("system_status", JSON.stringify(stored));
     console.log(`Status updated: ${keyword}`);
-  }
-
-  // Mark orphan photos as consumed so they don't pile up
-  for (const photo of photos) {
-    const dedupKey = `msg:${photo.id}`;
-    if (!(await env.ANTITHEFT_STATE.get(dedupKey))) {
-      await env.ANTITHEFT_STATE.put(
-        dedupKey,
-        JSON.stringify({ whatsapp: true, sms: true }),
-        { expirationTtl: 86400 }
-      );
-      console.log(`Consumed orphan photo ${photo.id}`);
-    }
   }
 }
 
@@ -646,218 +500,10 @@ async function pollNtfy(env) {
   return messages.filter((msg) => msg.event === "message");
 }
 
-async function sendWhatsApp(env, message, mediaUrl) {
-  const url = `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`;
-  const auth = btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`);
-
-  const params = {
-    To: env.TWILIO_TO,
-    From: env.TWILIO_FROM,
-    Body: message,
-  };
-  if (mediaUrl) {
-    params.MediaUrl = mediaUrl;
-    console.log(`Attaching photo: ${mediaUrl}`);
-  }
-  const body = new URLSearchParams(params);
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: body.toString(),
-  });
-
-  if (!resp.ok) {
-    const err = await resp.text();
-    console.error(`Twilio error ${resp.status}: ${err}`);
-    return false;
-  }
-
-  return true;
-}
-
-async function analyzePhoto(analyzeUrl, imageUrl, cmdSecret) {
-  try {
-    const headers = { "Content-Type": "application/json" };
-    if (cmdSecret) headers["X-CMD-Secret"] = cmdSecret;
-    const resp = await fetch(analyzeUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ imageUrl }),
-    });
-    if (!resp.ok) {
-      console.error(`Analyze API error: ${resp.status}`);
-      return null;
-    }
-    const data = await resp.json();
-    return data.threatLevel && data.verdict
-      ? `${data.threatLevel}: ${data.verdict}`
-      : null;
-  } catch (err) {
-    console.error(`Analyze failed: ${err.message}`);
-    return null;
-  }
-}
-
-function formatWhatsAppMessage(alert, aiVerdict) {
-  const body = alert.message || "";
-  const lines = body.split("\n");
-
-  let reason = "Unknown";
-  let location = "";
-  let mapsUrl = "";
-
-  for (const line of lines) {
-    const alertMatch = line.match(/^ALERT:\s*(.+)/);
-    if (alertMatch) {
-      reason = alertMatch[1].trim();
-    }
-
-    const locMatch = line.match(/^Location:\s*([-\d.]+,[-\d.]+)/);
-    if (locMatch) {
-      location = locMatch[1];
-    }
-
-    const urlMatch = line.match(/(https:\/\/maps\.google\.com\/[^\s]+)/);
-    if (urlMatch) {
-      mapsUrl = urlMatch[1];
-    }
-  }
-
-  let msg = `🚨 Anti-Theft ALERT\nReason: ${reason}`;
-
-  if (location) {
-    msg += `\nLocation: ${location}`;
-  }
-  if (mapsUrl) {
-    msg += `\n${mapsUrl}`;
-  }
-  if (aiVerdict) {
-    msg += `\n\n🤖 AI Analysis: ${aiVerdict}`;
-  }
-
-  // Keep under 600 chars (expanded for AI verdict)
-  return msg.slice(0, 600);
-}
-
-function formatSMSMessage(alert, photoUrl) {
-  const body = alert.message || "";
-  const lines = body.split("\n");
-
-  let reason = "Unknown";
-  let mapsUrl = "";
-
-  for (const line of lines) {
-    const alertMatch = line.match(/ALERT:\s*(.+)/);
-    if (alertMatch) reason = alertMatch[1].trim();
-
-    const urlMatch = line.match(/(https:\/\/maps\.google\.com\/[^\s)]+)/);
-    if (urlMatch) mapsUrl = urlMatch[1];
-  }
-
-  // Single concise line: reason + Maps URL + photo URL.
-  // Target ≤160 chars to avoid multi-segment billing on long-code SMS.
-  let msg = `ALERT: ${reason}`;
-  if (mapsUrl) msg += ` ${mapsUrl}`;
-  if (photoUrl) msg += ` Photo: ${photoUrl}`;
-  return msg.slice(0, 160);
-}
-
-// ── Outbound SMS via Twilio ──────────────────────────────────
-async function sendSMS(env, message) {
-  const url = `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`;
-  const auth = btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`);
-
-  const body = new URLSearchParams({
-    To: env.TWILIO_SMS_TO,
-    From: env.TWILIO_SMS_FROM,
-    Body: message,
-  });
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: body.toString(),
-  });
-
-  if (!resp.ok) {
-    const err = await resp.text();
-    // Parse Twilio error JSON for structured logging.
-    // Error 30034 = carrier violation (10DLC campaign not yet approved).
-    // Error 21610 = unsubscribed recipient.
-    try {
-      const errData = JSON.parse(err);
-      const code = errData.code || resp.status;
-      if (code === 30034) {
-        console.error(`Twilio SMS BLOCKED code=30034 (10DLC campaign pending): ${errData.message}`);
-      } else {
-        console.error(`Twilio SMS error code=${code}: ${errData.message}`);
-      }
-    } catch {
-      console.error(`Twilio SMS error HTTP ${resp.status}: ${err.slice(0, 300)}`);
-    }
-    return false;
-  }
-
-  // NOTE: Twilio may accept the message (HTTP 201) but fail delivery
-  // asynchronously with error 30034. That failure only shows in Twilio
-  // Console or via a status callback webhook, not in this response.
-  return true;
-}
-
-// ── Inbound SMS webhook from Twilio ──────────────────────────
-async function handleInboundSMS(request, env) {
-  // Parse form body
-  const formData = await request.formData();
-  const params = Object.fromEntries(formData);
-
-  // Validate Twilio signature (HMAC-SHA1)
-  const signature = request.headers.get("X-Twilio-Signature") || "";
-  const requestUrl = new URL(request.url);
-  // Twilio signs against the full URL as configured in the webhook
-  const signUrl = requestUrl.origin + requestUrl.pathname;
-
-  const isValid = await verifyTwilioSignature(
-    env.TWILIO_AUTH_TOKEN,
-    signUrl,
-    params,
-    signature
-  );
-  if (!isValid) {
-    console.error("Invalid Twilio signature");
-    return new Response("Forbidden", { status: 403 });
-  }
-
-  // Sender whitelist — compare last 10 digits
-  const from = (params.From || "").replace(/[\s\-+]/g, "");
-  const fromLast10 = from.slice(-10);
-  if (fromLast10 !== OWNER_LAST10) {
-    console.error(`Rejected SMS from ${params.From}`);
-    return new Response("Forbidden", { status: 403 });
-  }
-
-  // Parse command
-  const rawBody = (params.Body || "").trim().toUpperCase();
-  if (!VALID_COMMANDS.includes(rawBody)) {
-    return twiml(`Unknown command. Valid: ${VALID_COMMANDS.join(" ")}`);
-  }
-
-  // Write to KV — SMS commands use the KV path (Worker→KV is same-edge = fast).
-  await enqueueCommand(env, rawBody, "sms");
-
-  return twiml(`Command queued: ${rawBody}`);
-}
-
-// ── Command Queue (KV-only) ──────────────────────────────────
-// All commands flow through KV: dashboard → /commands/dispatch → KV,
-// SMS → /sms/inbound → KV.  LILYGO polls /commands/poll (authenticated
-// by DEVICE_POLL_TOKEN).  Single source eliminates duplicate delivery.
+// ── Command Queue (KV fallback lane) ─────────────────────────
+// Dashboard → /commands/dispatch → KV; LILYGO polls /commands/poll
+// (authenticated by DEVICE_POLL_TOKEN). The browser's direct MQTT
+// publish is the primary command path; this queue is the HTTP fallback.
 
 const CMD_QUEUE_KEY = "cmd_queue";
 const CMD_MAX_AGE_MS = 300000; // 5 minutes
@@ -955,48 +601,10 @@ async function handleCommandsDispatch(request, env) {
     );
   }
 
-  // Write to KV — sole command path for both dashboard and SMS.
+  // Write to KV — HTTP fallback lane for dashboard commands.
   const id = await enqueueCommand(env, body, "dashboard");
   const writeTs = Date.now();
 
   return corsJson({ status: "queued", command: body, id, writeTs });
 }
 
-function twiml(message) {
-  const xml = `<Response><Message>${escapeXml(message)}</Message></Response>`;
-  return new Response(xml, {
-    headers: { "Content-Type": "text/xml" },
-  });
-}
-
-function escapeXml(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-async function verifyTwilioSignature(authToken, url, params, expected) {
-  // Build the data string: URL + sorted param keys with values concatenated
-  const sortedKeys = Object.keys(params).sort();
-  let data = url;
-  for (const key of sortedKeys) {
-    data += key + params[key];
-  }
-
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(authToken),
-    { name: "HMAC", hash: "SHA-1" },
-    false,
-    ["sign"]
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(data));
-
-  // Base64 encode and compare in constant time to prevent timing attacks
-  const computed = btoa(String.fromCharCode(...new Uint8Array(sig)));
-  if (computed.length !== expected.length) return false;
-  let result = 0;
-  for (let i = 0; i < computed.length; i++) {
-    result |= computed.charCodeAt(i) ^ expected.charCodeAt(i);
-  }
-  return result === 0;
-}
