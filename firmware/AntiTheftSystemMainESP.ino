@@ -66,7 +66,7 @@ RCSwitch mySwitch = RCSwitch();
 #define CODE_DISARM     616610
 
 volatile bool armed = false;
-bool immobilized = false;
+volatile bool immobilized = false;
 Preferences preferences;
 
 bool lastVibration = LOW;
@@ -327,6 +327,8 @@ void loop() {
         if (!alarmInProgress) SerialLilyGO.println("STATUS:ARMED");
         else statusPending = true;
         xSemaphoreGive(lilygoMutex);
+      } else {
+        statusPending = true;  // mutex busy — flushed after alarm or by loop
       }
     } else if (code == CODE_DISARM && armed) {
       armed = false;
@@ -339,6 +341,8 @@ void loop() {
         if (!alarmInProgress) SerialLilyGO.println("STATUS:DISARMED");
         else statusPending = true;
         xSemaphoreGive(lilygoMutex);
+      } else {
+        statusPending = true;  // mutex busy — flushed after alarm or by loop
       }
     }
   }
@@ -363,10 +367,28 @@ void loop() {
           handleSMSCommand(smsCmd);
         } else if (r.startsWith("GPS_SPEED:")) {
           lastGpsSpeedMph = r.substring(10).toFloat();
+        } else if (r == "LILYGO_READY") {
+          // LILYGO came up after setup's 60s wait (slow modem registration
+          // or an independent reboot) — re-sync state, same as setup.
+          SerialLilyGO.println(armed ? "STATUS:ARMED" : "STATUS:DISARMED");
+          if (immobilized) SerialLilyGO.println("STATUS:IMMOBILIZED");
+          Serial.println("Synced state to LILYGO (late ready)");
         }
       }
     }
     xSemaphoreGive(lilygoMutex);
+  }
+
+  // Flush any deferred STATUS — covers the RF mutex-timeout deferral and an
+  // arm/disarm that lands after the alarm task's own statusPending check.
+  if (statusPending && !alarmInProgress) {
+    if (xSemaphoreTake(lilygoMutex, pdMS_TO_TICKS(50))) {
+      statusPending = false;
+      SerialLilyGO.println(armed ? "STATUS:ARMED" : "STATUS:DISARMED");
+      if (immobilized) SerialLilyGO.println("STATUS:IMMOBILIZED");
+      Serial.println("Flushed deferred STATUS to LILYGO");
+      xSemaphoreGive(lilygoMutex);
+    }
   }
 
   // Periodic motion push to LILYGO
@@ -582,8 +604,8 @@ void alarmTask(void* param) {
 
   // Flush any STATUS that was deferred while alarm owned the UART
   if (statusPending) {
-    statusPending = false;
     if (xSemaphoreTake(lilygoMutex, pdMS_TO_TICKS(200))) {
+      statusPending = false;
       SerialLilyGO.println(armed ? "STATUS:ARMED" : "STATUS:DISARMED");
       if (immobilized) SerialLilyGO.println("STATUS:IMMOBILIZED");
       Serial.println("  Flushed deferred STATUS to LILYGO");

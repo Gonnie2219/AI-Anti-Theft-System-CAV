@@ -1,18 +1,18 @@
 /*
  * Anti-Theft System  -  LILYGO T-SIM7600G-H Cellular Gateway
  *
- * Receives ALERT and STATUS commands from the Main ESP32 over UART2,
- * sends SMS alerts to the owner, and POSTs notifications + photo evidence
- * to ntfy.sh. Receives SMS commands from the owner and forwards them
- * back to Main over UART.
+ * Receives ALERT and STATUS messages from the Main ESP32 over UART2 and
+ * POSTs notifications + photo evidence to ntfy.sh for the dashboard.
+ * Receives owner commands via MQTT push (with Worker-queue poll as
+ * fallback) and forwards them to Main over UART.
  *
  * SIM:  Hologram (AT&T/T-Mobile multi-carrier),  APN "hologram"
  *
  * Network notes:
  *   Hologram assigns IPv4 PDP addresses. We use the modem's built-in
  *   HTTP client (AT+HTTPINIT / AT+HTTPACTION) for ntfy.sh communication.
- *   SMS is routed through Twilio via a Cloudflare Worker webhook bridge
- *   (no native AT+CMGS needed).
+ *   Owner commands arrive via MQTT push (HiveMQ Cloud, AT+CMQTT) with
+ *   HTTPS polling of the Cloudflare Worker command queue as fallback.
  *
  * UART map:
  *   Serial   (UART0)  =  USB debug
@@ -37,9 +37,6 @@
 // ── Configuration ────────────────────────────────────────────
 const char    APN[]            = "hologram";
 const char    NTFY_TOPIC[]     = "antitheft-gonnie-2219";
-const char    OWNER_PHONE[]    = "+16093589220";
-
-#define USE_NATIVE_SMS      0          // 1 = SpeedTalk AT+CMGS, 0 = Twilio via ntfy
 
 #define IMG_BUF_SIZE        65536      // 64 KB photo buffer
 #define HEARTBEAT_MS      300000UL     // 5 minutes
@@ -62,11 +59,6 @@ const char    OWNER_PHONE[]    = "+16093589220";
 // Shared secret for authenticating with Worker endpoints.
 // See secrets.h.example — copy to secrets.h and fill in the real value.
 #include "secrets.h"
-
-#if USE_NATIVE_SMS
-#define SMS_POLL_MS        60000UL     // safety-net SMS poll
-#define SMS_MAX_PER_HOUR       10
-#endif
 
 // ── Aliases ──────────────────────────────────────────────────
 #define SerialMon  Serial
@@ -117,12 +109,6 @@ volatile bool mqttConnected = false;
 unsigned long lastMqttReconnectMs = 0;
 const unsigned long MQTT_RECONNECT_INTERVAL_MS = 10000;  // 10s backoff
 static const char* MQTT_CMD_TOPIC = "cmd/antitheft/commands";
-
-#if USE_NATIVE_SMS
-unsigned long lastSMSPoll   = 0;
-int           smsCount      = 0;
-unsigned long smsHourStart  = 0;
-#endif
 
 // ─────────────────────────────────────────────────────────────
 //  Centralized SerialAT reader — intercepts MQTT URCs
@@ -967,69 +953,8 @@ String getModemTime() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  SMS — outbound (rate limited)
-// ─────────────────────────────────────────────────────────────
-#if USE_NATIVE_SMS
-bool sendSMS(String to, String body) {
-  unsigned long now = millis();
-  if (now - smsHourStart > 3600000UL) { smsHourStart = now; smsCount = 0; }
-  if (smsCount >= SMS_MAX_PER_HOUR) {
-    SerialMon.println("[SMS] rate limit reached");
-    return false;
-  }
-
-  SerialMon.println("[SMS] -> " + to + " (" + String(body.length()) + " chars)");
-
-  while (SerialAT.available()) SerialAT.read();
-  SerialAT.print("AT+CMGS=\"");
-  SerialAT.print(to);
-  SerialAT.println("\"");
-
-  // Wait for '>' prompt
-  unsigned long start = millis();
-  String pre;
-  bool gotPrompt = false;
-  while (millis() - start < 5000) {
-    while (SerialAT.available()) pre += (char)SerialAT.read();
-    if (pre.indexOf(">") >= 0) { gotPrompt = true; break; }
-    delay(20);
-  }
-  if (!gotPrompt) { SerialMon.println("[SMS] no prompt"); return false; }
-
-  SerialAT.print(body);
-  SerialAT.write((uint8_t)26);  // Ctrl+Z to send
-
-  start = millis();
-  String post;
-  while (millis() - start < 30000) {
-    while (SerialAT.available()) post += (char)SerialAT.read();
-    if (post.indexOf("+CMGS:") >= 0 && post.indexOf("OK") >= 0) {
-      smsCount++;
-      SerialMon.println("[SMS] sent (" + String(smsCount) + "/" + String(SMS_MAX_PER_HOUR) + " this hour)");
-      return true;
-    }
-    if (post.indexOf("ERROR") >= 0) { SerialMon.println("[SMS] error"); return false; }
-    delay(50);
-  }
-  SerialMon.println("[SMS] timeout");
-  return false;
-}
-
-#endif // USE_NATIVE_SMS
-
-// ─────────────────────────────────────────────────────────────
 //  SMS — inbound
 // ─────────────────────────────────────────────────────────────
-static String last10(String s) {
-  s.replace(" ", ""); s.replace("-", ""); s.replace("+", "");
-  int len = s.length();
-  return (len <= 10) ? s : s.substring(len - 10);
-}
-
-static bool isAuthorized(String number) {
-  return last10(number) == last10(String(OWNER_PHONE));
-}
-
 void handleSMSCommand(String cmd) {
   cmd.trim();
   cmd.toUpperCase();
@@ -1065,39 +990,6 @@ void handleSMSCommand(String cmd) {
   }
   // Unknown commands silently dropped (Worker already validated)
 }
-
-#if USE_NATIVE_SMS
-void pollIncomingSMS() {
-  String r = sendAT("AT+CMGL=\"REC UNREAD\"", "OK", 5000);
-  int idx = 0;
-  while ((idx = r.indexOf("+CMGL:", idx)) >= 0) {
-    int eol = r.indexOf('\n', idx);
-    if (eol < 0) break;
-    String header = r.substring(idx, eol);
-
-    // Quoted fields:  index, "REC UNREAD", "<sender>", , "<datetime>"
-    int q1 = header.indexOf('"');
-    int q2 = header.indexOf('"', q1 + 1);
-    int q3 = header.indexOf('"', q2 + 1);
-    int q4 = header.indexOf('"', q3 + 1);
-    if (q3 < 0 || q4 < 0) { idx = eol + 1; continue; }
-    String sender = header.substring(q3 + 1, q4);
-
-    int bodyStart = eol + 1;
-    int bodyEnd = r.indexOf("+CMGL:", bodyStart);
-    if (bodyEnd < 0) bodyEnd = r.indexOf("\nOK", bodyStart);
-    if (bodyEnd < 0) bodyEnd = r.length();
-    String body = r.substring(bodyStart, bodyEnd);
-    body.trim();
-
-    if (isAuthorized(sender)) handleSMSCommand(body);
-    else SerialMon.println("[SMS] rejected from " + sender);
-
-    idx = bodyEnd;
-  }
-  sendAT("AT+CMGD=1,1", "OK", 3000);   // delete read messages
-}
-#endif // USE_NATIVE_SMS
 
 // ─────────────────────────────────────────────────────────────
 //  Photo reception from Main ESP32
@@ -1163,16 +1055,6 @@ void handleAlert(String reason) {
   }
   updateGPS();
 
-#if USE_NATIVE_SMS
-  // 3) SMS first — it's the fastest and most reliable notification channel.
-  //    Skip SMS for user-initiated photo requests.
-  if (!isPhotoRequest) {
-    String smsBody = "ALERT: " + reason;
-    if (gpsMapsLink.length() > 0) smsBody += "\n" + gpsMapsLink;
-    sendSMS(OWNER_PHONE, smsBody);
-  }
-#endif
-
   // 4) ntfy text notification (real alerts forwarded to WhatsApp by Worker)
   String body, headers;
   if (isPhotoRequest) {
@@ -1220,7 +1102,9 @@ void handleAlert(String reason) {
 }
 
 void handleStatus(String status) {
-  systemArmed = (status == "ARMED");
+  // Only arm/disarm mutate systemArmed — IMMOBILIZED / IGNITION_OK must not clobber it.
+  if (status == "ARMED") systemArmed = true;
+  else if (status == "DISARMED") systemArmed = false;
   lastActivityMs = millis();
   SerialMon.println("[STATUS] " + status);
 
@@ -1399,15 +1283,6 @@ void setup() {
   // GPS starts OFF; enabled on STATUS:ARMED from Main
   SerialMon.println("[GPS] off at boot (disarmed)");
 
-#if USE_NATIVE_SMS
-  // SMS configuration (native AT+CMGS path)
-  sendAT("AT+CMGF=1",                  "OK", 2000);  // text mode
-  sendAT("AT+CSCS=\"GSM\"",            "OK", 2000);  // GSM character set
-  sendAT("AT+CPMS=\"ME\",\"ME\",\"ME\"", "OK", 3000); // store in modem memory
-  sendAT("AT+CNMI=2,1,0,0,0",          "OK", 2000);  // +CMTI URC on new SMS
-  sendAT("AT+CMGD=1,4",                "OK", 5000);  // delete any stale SMS
-#endif
-
   // NVS — persist last ntfy command ID across reboots
   preferences.begin("antitheft", false);
   lastCmdId = preferences.getString("lastCmdId", "0");
@@ -1433,9 +1308,6 @@ void setup() {
     int rc = httpPostText(NTFY_TOPIC, "Title: Startup\r\nPriority: low\r\nTags: rocket", startBody);
     SerialMon.println(rc == 200 ? "Startup HTTP OK" : "Startup HTTP failed (continuing)");
   }
-#if USE_NATIVE_SMS
-  sendSMS(OWNER_PHONE, "Anti-theft system online.");
-#endif
 
   digitalWrite(LED_PIN, LOW);
   lastHeartbeat    = millis();
@@ -1445,9 +1317,6 @@ void setup() {
   lastActivityMs   = millis();   // boot counts as activity
   pollFast         = true;
   SerialMon.println("POLL: fast (boot)");
-#if USE_NATIVE_SMS
-  lastSMSPoll   = millis();
-#endif
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1525,23 +1394,6 @@ void loop() {
       httpPostTextRetry(NTFY_TOPIC, "Title: Safety Lockout\r\nPriority: high\r\nTags: warning", body);
     }
   }
-
-#if USE_NATIVE_SMS
-  // 2) SMS URC notifications (native SMS path)
-  if (SerialAT.available()) {
-    String urc = SerialAT.readStringUntil('\n');
-    urc.trim();
-    if (urc.indexOf("+CMTI:") >= 0) pollIncomingSMS();
-  }
-#endif
-
-#if USE_NATIVE_SMS
-  // 4) Periodic SMS poll (catches URCs eaten by other AT calls)
-  if (now - lastSMSPoll > SMS_POLL_MS) {
-    pollIncomingSMS();
-    lastSMSPoll = now;
-  }
-#endif
 
   // 5) Periodic GPS update
   if (now - lastGPS > GPS_UPDATE_MS) {
